@@ -15,6 +15,15 @@
 > 
 > 如要答题，请使用其它脚本，如：[华医网自动化考试助手 (V2.3.3 - Key优化版)](https://greasyfork.org/scripts/545001)。
 
+#### 📥 安装步骤（3步搞定）
+1. **安装油猴扩展**
+   - Chrome/Edge: [Tampermonkey](https://www.tampermonkey.net/)
+   - Firefox: [Greasemonkey](https://addons.mozilla.org/firefox/addon/greasemonkey/)
+2. **安装脚本**
+   - 点击脚本链接 [华医网视频播放脚本 Pro](https://greasyfork.org/zh-CN/scripts/557281-%E5%8D%8E%E5%8C%BB%E7%BD%91%E8%A7%86%E9%A2%91%E6%92%AD%E6%94%BE%E8%84%9A%E6%9C%AC-pro) → `安装脚本` → `确认安装`
+3. **刷新页面**
+   - 访问华医网任意页面 → 自动运行
+
 #### 🎯 核心功能
 1. **智能播放器切换**  
    - 自动检测播放器类型（优先CC播放器，支持倍速；失败回退Polyv播放器）
