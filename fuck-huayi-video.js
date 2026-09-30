@@ -166,6 +166,9 @@
     let clock = null;
     let timeCheckInterval = null; // 时间监控定时器
     let lastSeekAt = 0; // 🔥 完成模式上次seek时间（防抖，避免进度条闪烁）
+    let jumpFailCount = 0; // 🔥 跳转未保持计数（连续3次回退后熔断，改用8x自然播放推进）
+    let stallPos = 0; // 🔥 停滞检测：上次记录的播放位置
+    let stallAt = 0; // 🔥 停滞检测：上次位置变化时间
     let isExpanded = false;
     let currentSpeed = realPlaybackRate;
     const urlTip = window.location.pathname.split('/').pop().split('?')[0];
@@ -208,25 +211,53 @@
         return safeParseJSON(localStorage.getItem('huayi_first_play'), {}) || {};
     }
 
+    // 🔥 v1.5：读取默认首播时间（含24小时有效期，防止忘记清除导致新课程被误判达标）
+    function getDefaultFirstPlay() {
+        try {
+            const raw = localStorage.getItem('huayi_default_first_play');
+            if (!raw) return null;
+            let t = NaN, setAt = 0;
+            try {
+                const obj = JSON.parse(raw);
+                if (obj && typeof obj === 'object') { t = obj.t; setAt = obj.set || 0; }
+                else t = parseInt(raw, 10);
+            } catch (e) { t = parseInt(raw, 10); }
+            if (isNaN(t)) { localStorage.removeItem('huayi_default_first_play'); return null; }
+            // 旧格式（无设置时间戳）或设置超过24小时 → 自动失效
+            if (!setAt || Date.now() - setAt > 24 * 3600 * 1000) {
+                localStorage.removeItem('huayi_default_first_play');
+                console.log('⏱️ 默认首播时间已失效（设置超过24小时），新课程将重新按首播计时');
+                return null;
+            }
+            return t;
+        } catch (e) { return null; }
+    }
+
     // 获取课程首次播放时间：优先精确记录；否则用用户设置的"默认首次观看时间"（老用户补录用）
     function getFirstPlayTime(cwid) {
         if (!cwid) return null;
         const map = getFirstPlayMap();
         if (map[cwid]) return map[cwid];
-        const def = parseInt(localStorage.getItem('huayi_default_first_play'), 10);
-        return isNaN(def) ? null : def;
+        return getDefaultFirstPlay();
     }
 
     function recordFirstPlay() {
         try {
             const cwid = new URLSearchParams(location.search).get('cwid');
             if (!cwid) return;
-            // 已有精确记录、或用户设置过默认首播时间时不再覆盖（默认时间优先）
-            if (getFirstPlayTime(cwid)) return;
+            const existing = getFirstPlayTime(cwid);
+            if (existing) {
+                // 已有记录（精确或默认补录）：确保课程级计时起点不晚于本课件起点
+                recordCourseStart(existing);
+                return;
+            }
+            const now = Date.now();
             const map = getFirstPlayMap();
-            map[cwid] = Date.now();
+            map[cwid] = now;
             localStorage.setItem('huayi_first_play', JSON.stringify(map));
-            console.log('🕒 已记录本课程首次播放时间（分天策略计时起点）');
+            console.log('🕒 已记录本课件首次播放时间（分天策略计时起点）');
+            // 🔥 课程级：课程首播时间 = 该课程最早开始播放的课件时间
+            recordCourseStart(now);
         } catch (e) {}
     }
 
@@ -241,14 +272,94 @@
         } catch (e) {}
     }
 
-    // 时间差是否已达标（可100%播完）
+    // 🔥 v1.5：课件页内嵌的 var cid（课程唯一标识，课程级考核用）
+    let _courseCidCache;
+    function getCourseCid() {
+        if (_courseCidCache !== undefined) return _courseCidCache;
+        _courseCidCache = null;
+        try {
+            const m = document.documentElement.outerHTML.match(/var\s+cid\s*=\s*['"]([0-9a-f-]{16,})['"]/i);
+            if (m) _courseCidCache = m[1].toLowerCase();
+        } catch (e) {}
+        return _courseCidCache;
+    }
+
+    // 🔥 v1.5：通过课件时长记录反查课件所属课程cid（结束页无cid时用）
+    function findCidByCwid(cwid) {
+        try {
+            const durMap = safeParseJSON(localStorage.getItem('huayi_course_durs'), {}) || {};
+            for (const cid in durMap) {
+                if (durMap[cid] && durMap[cid][cwid]) return cid;
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    // 🔥 v1.5：记录课程级计时起点（取更早者；补录场景沿用默认首播时间）
+    function recordCourseStart(t) {
+        try {
+            const cid = getCourseCid();
+            if (!cid) return;
+            const map = safeParseJSON(localStorage.getItem('huayi_course_start'), {}) || {};
+            if (!map[cid] || t < map[cid]) {
+                map[cid] = t;
+                localStorage.setItem('huayi_course_start', JSON.stringify(map));
+            }
+        } catch (e) {}
+    }
+
+    // 🔥 v1.5：观察并记录每个课件的时长（首日播放时逐个累计，构成课程总时长）
+    function observeWareDuration(durationSec) {
+        try {
+            if (!durationSec || isNaN(durationSec) || durationSec <= 0) return;
+            const cid = getCourseCid();
+            const cwid = new URLSearchParams(location.search).get('cwid');
+            if (!cid || !cwid) return;
+            const map = safeParseJSON(localStorage.getItem('huayi_course_durs'), {}) || {};
+            map[cid] = map[cid] || {};
+            const sec = Math.ceil(durationSec);
+            if (map[cid][cwid] !== sec) {
+                map[cid][cwid] = sec;
+                localStorage.setItem('huayi_course_durs', JSON.stringify(map));
+            }
+        } catch (e) {}
+    }
+
+    // 🔥 v1.5：课程级时钟（课程首播时间 + 已观察到的所有课件时长之和）
+    function getCourseClock(cid) {
+        try {
+            if (!cid) return null;
+            const startMap = safeParseJSON(localStorage.getItem('huayi_course_start'), {}) || {};
+            const durMap = safeParseJSON(localStorage.getItem('huayi_course_durs'), {}) || {};
+            const start = startMap[cid];
+            const durs = durMap[cid] || {};
+            let total = 0;
+            for (const k in durs) total += durs[k];
+            if (!start || total <= 0) return null;
+            return { start, totalSec: total };
+        } catch (e) { return null; }
+    }
+
+    // 🔥 v1.5：时间差考核冗余系数（比服务器要求多留10%，防止边界误差导致判定不通过）
+    const TIME_MARGIN = 1.10;
+
+    // 时间差是否已达标（可100%播完）——双重考核：
+    // ① 单视频：本课件首播时间 + 本视频时长×1.1（服务器按视频记录开始播放时间）
+    // ② 课程级：课程首播时间 + 课程所有课件时长之和×1.1（系统按课程总时长考核学分，
+    //    倍速播放省下的时间必须用真实时间差补回来，否则总时长不符合）
+    // 注：调用方都在视频播放循环中，这里顺带观察记录本课件时长
     function canCompleteFully(durationSec) {
         try {
+            observeWareDuration(durationSec);
             const cwid = new URLSearchParams(location.search).get('cwid');
             if (!cwid) return false;
             const first = getFirstPlayTime(cwid);
             if (!first) return false; // 无任何记录视为首次播放，启用95%保护
-            return Date.now() - first >= (durationSec || 0) * 1000;
+            if (Date.now() - first < (durationSec || 0) * 1000 * TIME_MARGIN) return false;
+            // 🔥 课程级考核：课程总时长未达标前不允许完成（哪怕单个视频时长已满足）
+            const clock = getCourseClock(getCourseCid());
+            if (clock && Date.now() - clock.start < clock.totalSec * 1000 * TIME_MARGIN) return false;
+            return true;
         } catch (e) {
             return false;
         }
@@ -402,11 +513,14 @@
         }, checkInterval);
     }
 
-    // 🔥 v1.5：当前是否有弹题弹窗/结果浮层在显示（供完成模式拉进度条前协调）
+    // 🔥 v1.5：当前是否有弹题/投票弹窗/结果浮层在显示（供完成模式拉进度条前协调）
     function hasActiveQuestion() {
         try {
             const box = document.querySelector('.ccQuestionBox');
             if (box && isElementVisible(box)) return true;
+            // CC播放器自带投票弹窗：越过投票时间点未作答会被强制暂停视频（queryVote）
+            const vote = document.querySelector('.ccVoteContainer, .ccVoteBox');
+            if (vote && isElementVisible(vote)) return true;
         } catch (e) {}
         return false;
     }
@@ -438,16 +552,42 @@
             if (!video || !video.duration || isNaN(video.duration)) return false;
             if (!canCompleteFully(video.duration)) return false;
 
-            // 🔥 关键：有弹题/结果浮层时不拉进度条，等自动答题模块处理完再拉。
-            // 拉进度条越过题目时间点会触发弹题并回退进度，
-            // 不等待的话会与弹题反复拉扯（进度条闪烁、永远到不了100%）
+            // 🔥 关键：有弹题/投票/结果浮层时不拉进度条，等自动处理模块完成再拉。
+            // 拉进度条越过题目/投票时间点会触发弹窗并回退/暂停进度，
+            // 不等待的话会与弹窗反复拉扯（进度条闪烁、永远到不了100%）
             if (hasActiveQuestion()) return true;
 
             const target = video.duration * 0.99;
-            // 跳到99%（3秒防抖避免闪烁）
-            if (video.currentTime < target - 1 && Date.now() - lastSeekAt > 3000) {
+
+            // 🔥 停滞恢复：位置10秒几乎没动（弹窗漏检/异常暂停）→ 强制恢复播放
+            const now = Date.now();
+            if (Math.abs(video.currentTime - stallPos) > 1) {
+                stallPos = video.currentTime;
+                stallAt = now;
+            } else if (now - stallAt > 10000) {
+                stallAt = now;
+                try {
+                    video.play().catch(() => {});
+                    console.log('⚠️ 检测到播放停滞，已强制恢复播放');
+                } catch (e) {}
+            }
+
+            // 跳到99%（3秒防抖避免闪烁；连续3次跳转未保持则熔断，交给8x自然播放）
+            if (video.currentTime < target - 1 && jumpFailCount < 3 && Date.now() - lastSeekAt > 3000) {
                 lastSeekAt = Date.now();
                 seekForward(video, target);
+                setTimeout(() => {
+                    try {
+                        const v = document.querySelector('video');
+                        if (!v || !v.duration || hasActiveQuestion()) return;
+                        if (v.currentTime < target - 5) {
+                            jumpFailCount++;
+                            console.log(`⚠️ 跳转未保持（第${jumpFailCount}次回退），当前 ${Math.floor(v.currentTime)} 秒`);
+                        } else {
+                            jumpFailCount = 0;
+                        }
+                    } catch (e) {}
+                }, 2000);
             }
             // 已达99%：1.0x匀速跑完最后1%（对外显示本来就是1.0x，无检测风险）
             // jumpToTime API不可用时退为8x播放，靠自然播放推进（看门狗安全上限）
@@ -509,9 +649,11 @@
             }
         }
 
-        // 刷新面板显示
+        // 🔥 v1.5：只更新文本（不再整面板重建——重建会让按钮事件丢失、点击落空）
         if (isExpanded) {
-            expandPanel();
+            updateFinishStateLine();
+            const sv = document.getElementById('speedValue');
+            if (sv) sv.textContent = speed.toFixed(2) + 'x';
         }
     }
 
@@ -990,6 +1132,25 @@
             }
             // 课程已完成，清除分天计时记录（日后重修时重新计时）
             clearFirstPlay(cwid);
+            // 🔥 v1.5：该课程所有课件都完成时，重置课程级计时起点（重修时重新累计总时长）
+            try {
+                const cid = getCourseCid() || findCidByCwid(cwid);
+                if (cid) {
+                    const fp = getFirstPlayMap();
+                    let others = 0;
+                    for (const k in fp) {
+                        if (k !== cwid && findCidByCwid(k) === cid) others++;
+                    }
+                    if (others === 0) {
+                        const sm = safeParseJSON(localStorage.getItem('huayi_course_start'), {}) || {};
+                        if (sm[cid]) {
+                            delete sm[cid];
+                            localStorage.setItem('huayi_course_start', JSON.stringify(sm));
+                            console.log('🏁 课程全部课件已完成，课程级计时已重置');
+                        }
+                    }
+                }
+            } catch (e) {}
         } catch (e) {}
     }
 
@@ -1199,8 +1360,106 @@
         // 结果按钮点击节流（防止1秒轮询重复点击"回看知识点/继续播放"）
         let lastResultClick = 0;
 
+        // 🔥 v1.5：处理CC播放器自带投票弹窗（.ccVoteContainer，越过投票时间点未作答会被强制暂停视频）
+        let voteHandling = false;
+        function getVoteBox() {
+            const el = document.querySelector('.ccVoteContainer, .ccVoteBox');
+            return (el && isElementVisible(el)) ? el : null;
+        }
+
+        function handleVote() {
+            const box = getVoteBox();
+            if (!box || voteHandling) return false;
+            voteHandling = true;
+            console.log('📊 检测到CC投票弹窗，自动处理');
+            try {
+                const lis = box.querySelectorAll('.ccVoteList li');
+                const inputs = box.querySelectorAll('.ccVoteInputBox input');
+                // 选第一个选项（li点击 + input选中双保险）
+                if (lis.length) {
+                    try { lis[0].click(); } catch (e) {}
+                }
+                if (inputs.length) {
+                    try {
+                        inputs[0].checked = true;
+                        inputs[0].dispatchEvent(new Event('change', { bubbles: true }));
+                        inputs[0].dispatchEvent(new Event('click', { bubbles: true }));
+                    } catch (e) {}
+                }
+                // 300ms后提交：优先"提交"按钮，不可见则点"跳过"
+                setTimeout(() => {
+                    try {
+                        const submit = document.getElementById('ccVoteSubmit');
+                        const jump = document.getElementById('ccVoteJumpOver');
+                        if (submit && isElementVisible(submit)) {
+                            submit.click();
+                            console.log('📤 投票已提交');
+                        } else if (jump && isElementVisible(jump)) {
+                            jump.click();
+                            console.log('⏭️ 投票已跳过');
+                        }
+                    } catch (e) {}
+                    setTimeout(() => {
+                        voteHandling = false;
+                        resumeVideo(); // 投票结束后若未自动恢复播放则强制恢复
+                    }, 800);
+                }, 300);
+            } catch (e) {
+                voteHandling = false;
+            }
+            return true;
+        }
+
+        // 🔥 v1.5：结果浮层统一处理。答对→点"继续播放"（播放器在此登记作答）；
+        // 答错→记错题→点"回看知识点"。返回 true=浮层存在且已处理。
+        // 改选答案前必须先经过这里，绝不能在已答对的题上改选其它选项。
+        function handleVisibleResult(rBox, markPlan, markInfo, markIsMulti) {
+            if (!rBox) return false;
+            const result = detectResult(rBox);
+            if (result !== 'right' && result !== 'wrong') return false;
+
+            // 点击节流：2.5秒内不重复点击结果按钮，等上一次点击生效
+            if (Date.now() - lastResultClick < 2500) return true;
+
+            if (result === 'wrong') {
+                console.log('❌ 弹题答错');
+                try {
+                    if (markPlan && markInfo && markIsMulti) {
+                        markWrong(markInfo.text, markPlan.map(i => markInfo.options[i].label));
+                    } else if (markPlan && markInfo && markPlan.length === 1) {
+                        markWrong(markInfo.text, [markInfo.options[markPlan[0]].label]);
+                    }
+                } catch (e) {}
+            } else {
+                console.log('🎉 弹题回答正确');
+            }
+            lastResultClick = Date.now();
+            clickResultButton(rBox);
+
+            if (result === 'right') {
+                // 1.5秒后确认："继续播放"无效（浮层仍在）→ 走"跳过"通道兜底登记
+                setTimeout(() => {
+                    const b = getQuestionBox();
+                    if (b && detectResult(b) === 'right') {
+                        console.log('⚠️ "继续播放"未生效，走"跳过"通道兜底');
+                        forceSkip(b);
+                        return;
+                    }
+                    handling = false;
+                    resumeVideo();
+                }, 1500);
+            } else {
+                // 答错：交回轮询，弹题重现后用未试过的选项重答
+                handling = false;
+                resumeVideo();
+            }
+            return true;
+        }
+
         function handleQuestion() {
             if (handling) return;
+            // 🔥 投票弹窗优先处理（独立于QA弹题的机制）
+            if (handleVote()) return;
             const box = getQuestionBox();
             if (!box) return;
 
@@ -1255,6 +1514,14 @@
                     return;
                 }
 
+                // 🔥 v1.5：上一轮答案的判题浮层可能刚出现（判题有延迟）——
+                // 先处理结果，绝不能在已答对的题上改选其它选项
+                const preResult = detectResult(curBox);
+                if (preResult === 'right' || preResult === 'wrong') {
+                    handleVisibleResult(curBox, round > 0 ? plans[round - 1] : null, info, isMulti);
+                    return;
+                }
+
                 // 🔥 v1.5：处于结果浮层且无选项（其它弹题UI）→ 先点对应按钮恢复题目
                 if (!getQuestionInfo(curBox).options.length) {
                     if (clickResultButton(curBox)) {
@@ -1279,41 +1546,33 @@
                         return;
                     }
 
-                    setTimeout(() => {
-                        const stillBox = getQuestionBox();
-                        const answered = !stillBox || isVideoPlaying();
-                        if (answered) {
-                            if (stillBox) stillBox.style.display = 'none'; // 清理残留弹窗
-                            console.log('✅ 弹题处理完成，继续播放视频');
-                            handling = false;
-                            resumeVideo();
+                    // 🔥 判题可能慢于提交（服务端判题）：轮询结果浮层最长约7秒，
+                    //    轮询期间绝不改选答案，避免把已答对的题改成错误答案
+                    let polls = 0;
+                    const pollJudge = () => {
+                        polls++;
+                        const rBox = getQuestionBox();
+                        const r = rBox ? detectResult(rBox) : null;
+
+                        if ((r === 'right' || r === 'wrong') &&
+                            handleVisibleResult(rBox, plan, info, isMulti)) return;
+
+                        if (!rBox) {
+                            // ⚠️ 弹窗消失但没有结果浮层：答题登记未通过按钮确认，
+                            //    用播放器自带"跳过"通道兜底（其处理器会正确登记该题，
+                            //    否则越过题目时间点会被反复拉回强制暂停）
+                            console.log('⚠️ 弹窗已消失但答题登记未确认，走"跳过"通道兜底');
+                            forceSkip(null);
                             return;
                         }
-
-                        const result = stillBox ? detectResult(stillBox) : null;
-                        if (result === 'right') {
-                            // 🎉 答对：点"继续播放"恢复正常播放
-                            lastResultClick = Date.now();
-                            clickResultButton(stillBox);
-                            handling = false;
-                            resumeVideo();
-                        } else if (result === 'wrong') {
-                            // ❌ 答错：记录错题 → 点"回看知识点" → 弹题重现后用未试过的选项重答
-                            console.log('❌ 弹题答错');
-                            if (!isMulti && plan.length === 1) {
-                                markWrong(info.text, [info.options[plan[0]].label]);
-                            } else if (isMulti) {
-                                markWrong(info.text, plan.map(i => info.options[i].label));
-                            }
-                            lastResultClick = Date.now();
-                            clickResultButton(stillBox);
-                            handling = false; // 交回轮询：弹题重现后自动换选项
-                            resumeVideo();
-                        } else {
-                            // 无结果浮层（可能未提交成功）→ 换下一个计划重试
-                            tryNext(round + 1);
+                        if (polls < 7) {
+                            setTimeout(pollJudge, 800);
+                            return;
                         }
-                    }, 2000);
+                        // 弹窗在但始终无浮层 → 提交未生效 → 换下一个计划重试
+                        tryNext(round + 1);
+                    };
+                    setTimeout(pollJudge, 2000);
                 }, 500);
             }
         }
@@ -1372,6 +1631,8 @@
         const drag = { active: false, moved: false, sx: 0, sy: 0, ox: 0, oy: 0 };
         panel.addEventListener('mousedown', (e) => {
             if (e.button !== 0) return;
+            // 🔥 展开状态下不拖拽按钮/输入框（滑块拖动误触发面板移动、按钮点击误触发拖拽）
+            if (isExpanded && e.target instanceof Element && e.target.closest('button, input')) return;
             drag.active = true;
             drag.moved = false;
             drag.sx = e.clientX;
@@ -1393,7 +1654,7 @@
             panel.style.top = top + 'px';
             panel.style.right = 'auto';
         });
-        document.addEventListener('mouseup', () => {
+        document.addEventListener('mouseup', (e) => {
             if (!drag.active) return;
             drag.active = false;
             if (drag.moved) {
@@ -1403,8 +1664,11 @@
                         top: parseInt(panel.style.top, 10) || 0
                     }));
                 } catch (e) {}
-            } else {
-                togglePanel(); // 没有产生拖动 → 视为点击
+            } else if (!isExpanded) {
+                // 🔥 关键修复：只有收起状态（悬浮球）的点击才展开面板。
+                // 之前展开状态下点击面板内任何位置（包括按钮）都会收起面板，
+                // 按钮在click事件派发前被移除导致点击丢失——这就是"清除"按钮失灵的根因
+                togglePanel();
             }
         });
 
@@ -1414,6 +1678,56 @@
                 collapsePanel();
             }
         };
+
+        // 🔥 v1.5：面板按钮统一事件委托（只在创建时绑定一次，innerHTML重建不影响，
+        // 修复"清除默认时间"等按钮点击无效的问题）
+        panel.addEventListener('click', (e) => {
+            const btn = e.target instanceof Element ? e.target.closest('button') : null;
+            if (!btn) return;
+
+            if (btn.id === 'nextBtn') {
+                e.stopPropagation();
+                proceedToNext();
+            } else if (btn.id === 'clearFailedBtn') {
+                e.stopPropagation();
+                localStorage.removeItem('huayi_failed_cc');
+                console.log('✅ 已清除CC失败记录');
+                expandPanel(); // 刷新面板
+            } else if (btn.id === 'setDefaultFirstPlayBtn') {
+                e.stopPropagation();
+                const input = document.getElementById('defaultFirstPlayInput');
+                const val = input?.value;
+                if (!val) { alert('请先选择日期和时间'); return; }
+                const ms = new Date(val).getTime();
+                if (isNaN(ms)) { alert('时间格式无效'); return; }
+                if (ms > Date.now()) { alert('首次观看时间不能晚于当前时间'); return; }
+                // 🔥 记录设置时间戳：默认时间只在设置后24小时内有效，防止忘记清除误伤新课程
+                localStorage.setItem('huayi_default_first_play', JSON.stringify({ t: ms, set: Date.now() }));
+                // 🔥 清除已有的精确首播记录，否则旧记录优先级更高，默认时间不生效
+                localStorage.removeItem('huayi_first_play');
+                console.log(`🕒 已设置默认首次观看时间: ${new Date(ms).toLocaleString()}（24小时内有效；已清除所有课程的精确首播记录）`);
+                updateFinishStateLine();
+                btn.textContent = '已设置';
+                setTimeout(() => { btn.textContent = '设置'; }, 1500);
+            } else if (btn.id === 'clearDefaultFirstPlayBtn') {
+                e.stopPropagation();
+                localStorage.removeItem('huayi_default_first_play');
+                const input = document.getElementById('defaultFirstPlayInput');
+                if (input) input.value = '';
+                console.log('🗑️ 已清除默认首次观看时间（新课程将重新按首播计时）');
+                updateFinishStateLine();
+            }
+        });
+
+        // 🔥 v1.5：倍速滑块也走事件委托（input事件会冒泡）
+        panel.addEventListener('input', (e) => {
+            if (e.target && e.target.id === 'speedSlider') {
+                const speed = parseFloat(e.target.value);
+                const sv = document.getElementById('speedValue');
+                if (sv) sv.textContent = speed.toFixed(2) + 'x';
+                setPlaybackSpeed(speed);
+            }
+        });
     }
 
     function togglePanel() {
@@ -1436,12 +1750,18 @@
             const first = getFirstPlayTime(cwid);
             if (urlTip.includes('course_ware') && v && v.duration && !isNaN(v.duration)) {
                 const tag = hasExact ? '' : '(默认首播)';
+                const clock = getCourseClock(getCourseCid());
+                const courseOk = !clock || Date.now() - clock.start >= clock.totalSec * 1000 * TIME_MARGIN;
                 if (!first) {
                     return '🕒 首次播放：95%保护跳转（计时起点已记录）';
-                } else if (Date.now() - first >= v.duration * 1000) {
+                } else if (Date.now() - first >= v.duration * 1000 * TIME_MARGIN && courseOk) {
                     return `✅ 时间已达标${tag}：将直接跳到99%匀速跑完`;
+                } else if (!courseOk) {
+                    const waitMin = Math.ceil((clock.totalSec * 1000 * TIME_MARGIN - (Date.now() - clock.start)) / 60000);
+                    const h = Math.floor(waitMin / 60), m = waitMin % 60;
+                    return `⏳ 课程总时长考核未达标${tag}：全课累计${Math.round(clock.totalSec / 60)}分钟(含10%冗余)，还需约${h ? h + '小时' : ''}${m}分钟（95%保护）`;
                 } else {
-                    const waitMin = Math.ceil((v.duration * 1000 - (Date.now() - first)) / 60000);
+                    const waitMin = Math.ceil((v.duration * 1000 * TIME_MARGIN - (Date.now() - first)) / 60000);
                     return `⏳ 时间未达标${tag}：还需等待约${waitMin}分钟（95%保护）`;
                 }
             }
@@ -1493,9 +1813,9 @@
 
         // 🔥 v1.5：分天策略状态（时间差是否已达标，支持默认首播时间）
         const finishStateText = computeFinishStateText();
-        // 🔥 v1.5：默认首次观看时间（老用户补录）
-        const savedDefault = parseInt(localStorage.getItem('huayi_default_first_play'), 10);
-        const defaultFirstPlayValue = isNaN(savedDefault) ? '' : formatDateTimeLocal(savedDefault);
+        // 🔥 v1.5：默认首次观看时间（老用户补录；含24小时有效期）
+        const savedDefault = getDefaultFirstPlay();
+        const defaultFirstPlayValue = savedDefault ? formatDateTimeLocal(savedDefault) : '';
 
         panel.innerHTML = `
             <div style="font-weight: bold; margin-bottom: 8px;">🛡️ 华医网视频播放脚本 Pro</div>
@@ -1542,7 +1862,7 @@
                         清除
                     </button>
                 </div>
-                <div style="font-size: 9px; opacity: 0.7; margin-top: 4px;">之前手动看过的课，填当时开始看的时间，二刷逻辑立即生效</div>
+                <div style="font-size: 9px; opacity: 0.7; margin-top: 4px;">之前手动看过的课，填当时开始看的时间，二刷逻辑立即生效；设置后24小时内有效，到期自动失效</div>
             </div>
 
             <div style="font-size: 9px; opacity: 0.7; margin-top: 8px; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.2);">
@@ -1550,57 +1870,8 @@
             </div>
         `;
 
-        // 绑定滑块事件
-        const speedSlider = document.getElementById('speedSlider');
-        const speedValue = document.getElementById('speedValue');
-        if (speedSlider) {
-            speedSlider.addEventListener('input', (e) => {
-                const speed = parseFloat(e.target.value);
-                speedValue.textContent = speed.toFixed(2) + 'x';
-                setPlaybackSpeed(speed);
-            });
-        }
-
-        // 绑定跳转按钮事件
-        document.getElementById('nextBtn')?.addEventListener('click', (e) => {
-            e.stopPropagation();
-            proceedToNext();
-        });
-
-        // 绑定清除失败记录按钮
-        document.getElementById('clearFailedBtn')?.addEventListener('click', (e) => {
-            e.stopPropagation();
-            localStorage.removeItem('huayi_failed_cc');
-            console.log('✅ 已清除CC失败记录');
-            expandPanel(); // 刷新面板
-        });
-
-        // 🔥 v1.5：绑定默认首次观看时间设置（老用户补录）
-        document.getElementById('setDefaultFirstPlayBtn')?.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const input = document.getElementById('defaultFirstPlayInput');
-            const val = input?.value;
-            if (!val) { alert('请先选择日期和时间'); return; }
-            const ms = new Date(val).getTime();
-            if (isNaN(ms)) { alert('时间格式无效'); return; }
-            if (ms > Date.now()) { alert('首次观看时间不能晚于当前时间'); return; }
-            localStorage.setItem('huayi_default_first_play', String(ms));
-            // 🔥 关键：清除已有的精确首播记录，否则旧记录优先级更高，默认时间不生效
-            localStorage.removeItem('huayi_first_play');
-            console.log(`🕒 已设置默认首次观看时间: ${new Date(ms).toLocaleString()}（已清除所有课程的精确首播记录，默认时间立即生效）`);
-            updateFinishStateLine();
-            e.target.textContent = '已设置';
-            setTimeout(() => { const b = document.getElementById('setDefaultFirstPlayBtn'); if (b) b.textContent = '设置'; }, 1500);
-        });
-
-        document.getElementById('clearDefaultFirstPlayBtn')?.addEventListener('click', (e) => {
-            e.stopPropagation();
-            localStorage.removeItem('huayi_default_first_play');
-            const input = document.getElementById('defaultFirstPlayInput');
-            if (input) input.value = '';
-            console.log('🗑️ 已清除默认首次观看时间（新课程将重新按首播计时）');
-            updateFinishStateLine();
-        });
+        // 🔥 v1.5：按钮/滑块事件已改为createPanel里的事件委托（绑定一次），
+        // 这里不再重复绑定，innerHTML重建不影响任何按钮功能
     }
 
     function collapsePanel() {
