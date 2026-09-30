@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      1.4
-// @description  该油猴脚本用于华医网的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题
+// @version      1.5
+// @description  该油猴脚本用于华医网的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
 // @match        *://*.bokecc.com/*
@@ -18,6 +18,29 @@
 
 (function () {
     'use strict';
+
+    // ==================== 🛡️ v1.6：移除华医网反插件检测器 ====================
+    // 页面在 document 上注册了合成点击检测器（e.isTrusted === false 时命中）：
+    // 点击 .ccSignWrapBtn（签到）/ .layer_tips .rig_btn / .lis-content h2 会触发
+    // blockAbnormalPlugin() → player.destroy() + "检测到异常插件"弹窗。
+    // 本脚本需要用合成点击自动处理签到弹窗，故在页面脚本运行前拦截其注册。
+    (function neutralizePluginDetector() {
+        try {
+            const origAdd = EventTarget.prototype.addEventListener;
+            EventTarget.prototype.addEventListener = function (type, fn, opts) {
+                try {
+                    if (this === document && String(type) === 'click' && typeof fn === 'function') {
+                        const src = String(fn);
+                        if (src.includes('isTrusted') && (src.includes('closest') || src.includes('blockAbnormalPlugin'))) {
+                            console.log('🛡️ 已拦截华医网反插件检测器注册');
+                            return;
+                        }
+                    }
+                } catch (e) {}
+                return origAdd.call(this, type, fn, opts);
+            };
+        } catch (e) {}
+    })();
 
     // ==================== 🔥 智能播放器切换逻辑 ====================
     (function smartPlayerSwitch() {
@@ -142,6 +165,7 @@
 
     let clock = null;
     let timeCheckInterval = null; // 时间监控定时器
+    let lastSeekAt = 0; // 🔥 完成模式上次seek时间（防抖，避免进度条闪烁）
     let isExpanded = false;
     let currentSpeed = realPlaybackRate;
     const urlTip = window.location.pathname.split('/').pop().split('?')[0];
@@ -173,6 +197,69 @@
                rect.width > 0 &&
                rect.height > 0 &&
                element.offsetParent !== null;
+    }
+
+    // ==================== 🔥 分天刷课：时间差记录 ====================
+    // 服务器按「结束时间 - 开始时间 ≥ 视频真实时长」判定有效学习，与倍速无关。
+    // 本地记录每个课程(cwid)的首次播放时间：
+    //   未达标（当前时间 < 首次播放时间 + 视频时长）：只播到95%即跳转，避免服务器重置起始时间
+    //   已达标（当前时间 ≥ 首次播放时间 + 视频时长）：放开95%限制，倍速播至100%完成课件
+    function getFirstPlayMap() {
+        return safeParseJSON(localStorage.getItem('huayi_first_play'), {}) || {};
+    }
+
+    // 获取课程首次播放时间：优先精确记录；否则用用户设置的"默认首次观看时间"（老用户补录用）
+    function getFirstPlayTime(cwid) {
+        if (!cwid) return null;
+        const map = getFirstPlayMap();
+        if (map[cwid]) return map[cwid];
+        const def = parseInt(localStorage.getItem('huayi_default_first_play'), 10);
+        return isNaN(def) ? null : def;
+    }
+
+    function recordFirstPlay() {
+        try {
+            const cwid = new URLSearchParams(location.search).get('cwid');
+            if (!cwid) return;
+            // 已有精确记录、或用户设置过默认首播时间时不再覆盖（默认时间优先）
+            if (getFirstPlayTime(cwid)) return;
+            const map = getFirstPlayMap();
+            map[cwid] = Date.now();
+            localStorage.setItem('huayi_first_play', JSON.stringify(map));
+            console.log('🕒 已记录本课程首次播放时间（分天策略计时起点）');
+        } catch (e) {}
+    }
+
+    function clearFirstPlay(cwid) {
+        try {
+            if (!cwid) return;
+            const map = getFirstPlayMap();
+            if (map[cwid]) {
+                delete map[cwid];
+                localStorage.setItem('huayi_first_play', JSON.stringify(map));
+            }
+        } catch (e) {}
+    }
+
+    // 时间差是否已达标（可100%播完）
+    function canCompleteFully(durationSec) {
+        try {
+            const cwid = new URLSearchParams(location.search).get('cwid');
+            if (!cwid) return false;
+            const first = getFirstPlayTime(cwid);
+            if (!first) return false; // 无任何记录视为首次播放，启用95%保护
+            return Date.now() - first >= (durationSec || 0) * 1000;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // 记录课件页所在目录，供结束页(exam_result.aspx)续播下一课时拼接URL
+    function saveCourseBase() {
+        try {
+            const base = location.origin + location.pathname.substring(0, location.pathname.lastIndexOf('/') + 1);
+            localStorage.setItem('huayi_course_base', base);
+        } catch (e) {}
     }
 
     // 等待DOM加载后再初始化UI
@@ -211,6 +298,8 @@
     // ==================== 核心功能 ====================
 
     function initVideo(type) {
+        recordFirstPlay();
+        saveCourseBase();
         blockPopups();
         simulateUserActivity();
 
@@ -230,7 +319,7 @@
 
                     // 添加视频结束事件监听（正常速度播放时使用）
                     video.addEventListener('ended', () => {
-                        if (currentSpeed === 1.0) {
+                        if (currentSpeed === 1.0 || canCompleteFully(video.duration)) {
                             console.log('🎬 视频自然结束（正常速度）');
                             // 触发状态检查，执行5秒等待逻辑
                             setTimeout(checkVideoStatus, 100);
@@ -274,13 +363,14 @@
         });
     }
 
-    // 🔥 修复：时间监控函数（倍速模式）- 考虑倍速影响，调整为240秒
+    // 🔥 时间监控函数（倍速模式）——分天策略核心：
+    // 未达标（当前时间 < 首次播放时间 + 视频时长）：只播到95%即跳转，保护服务器记录的起始时间
+    // 已达标（当前时间 ≥ 首次播放时间 + 视频时长）：不再卡95%，播放至100%完成后再跳转
     function startTimeCheck() {
         clearInterval(timeCheckInterval);
 
-        // 🔥 关键修复：根据倍速调整检测频率和跳转时机
         const checkInterval = Math.max(500, 1000 / currentSpeed); // 倍速越高，检测越频繁
-        const jumpThreshold = 240 / currentSpeed; // 🔥 修改：倍速下调整跳转阈值为240秒
+        const jumpThreshold = 240 / currentSpeed; // 未达标时的跳转阈值（240秒 ÷ 倍速）
 
         console.log(`🔧 倍速监控: 检测间隔${checkInterval}ms, 跳转阈值${jumpThreshold.toFixed(1)}秒`);
 
@@ -291,9 +381,17 @@
                     const remaining = video.duration - video.currentTime;
                     const progress = video.currentTime / video.duration;
 
-                    // 🔥 修复：使用调整后的跳转阈值，并添加进度保护
-                    if (remaining <= jumpThreshold || progress >= 0.95) {
-                        console.log(`⏱️ 倍速跳转: 剩余${Math.round(remaining)}秒, 进度${(progress*100).toFixed(1)}%`);
+                    if (canCompleteFully(video.duration)) {
+                        // 🔥 时间差已达标：直接跳到99%匀速跑完，播放到头再跳转
+                        handleCompletionPass(video);
+                        if (video.ended || remaining <= 1 || progress >= 0.999) {
+                            console.log(`🏁 时间已达标，视频播放至${(progress * 100).toFixed(1)}%，完成本课`);
+                            clearInterval(timeCheckInterval);
+                            setTimeout(proceedToNext, 2000);
+                        }
+                    } else if (remaining <= jumpThreshold || progress >= 0.95) {
+                        // 未达标：95%保护跳转
+                        console.log(`⏱️ 时间未达标，95%保护跳转: 剩余${Math.round(remaining)}秒, 进度${(progress*100).toFixed(1)}%`);
                         clearInterval(timeCheckInterval);
                         proceedToNext();
                     }
@@ -304,9 +402,75 @@
         }, checkInterval);
     }
 
+    // 🔥 v1.5：当前是否有弹题弹窗/结果浮层在显示（供完成模式拉进度条前协调）
+    function hasActiveQuestion() {
+        try {
+            const box = document.querySelector('.ccQuestionBox');
+            if (box && isElementVisible(box)) return true;
+        } catch (e) {}
+        return false;
+    }
+
+    // 🔥 v1.6：执行前进seek —— 使用CC播放器官方API jumpToTime
+    // 源码分析（h5player-3.6.2.js）结论：
+    // 1) 播放器有反快进看门狗：banDrag && 单次前进>2秒 && 当前时间>已看最大时间(currPlayedMaxTime)
+    //    → 强制回退。直接改currentTime、模拟点击进度条都会被回退/拦截（之前"拉不动"的根因）
+    // 2) jumpToTime 内部先 this.lastVideoTime = 目标时间 再 setCurrentTime，
+    //    看门狗计算的前进量恒≈0，永不触发回退（华医网页面自己就用它做续播跳转）
+    function seekForward(video, target) {
+        try {
+            const p = window.cc_js_Player || window.player;
+            if (p && typeof p.jumpToTime === 'function') {
+                p.jumpToTime(Math.floor(target));
+                console.log(`🎯 已通过 cc_js_Player.jumpToTime 跳到 ${Math.floor(target)} 秒（99%）`);
+                return true;
+            }
+        } catch (e) {}
+        // 兜底：直接改currentTime（会被看门狗回退，仅占位）
+        try { video.currentTime = target; } catch (e) {}
+        return false;
+    }
+
+    // 🔥 v1.5：分天达标完成 —— 不管进度条在哪，直接拉到99%，固定1.0x匀速跑完最后1%
+    // 返回 true 表示当前处于"达标完成"模式（调用方应跳过常规倍速逻辑）
+    function handleCompletionPass(video) {
+        try {
+            if (!video || !video.duration || isNaN(video.duration)) return false;
+            if (!canCompleteFully(video.duration)) return false;
+
+            // 🔥 关键：有弹题/结果浮层时不拉进度条，等自动答题模块处理完再拉。
+            // 拉进度条越过题目时间点会触发弹题并回退进度，
+            // 不等待的话会与弹题反复拉扯（进度条闪烁、永远到不了100%）
+            if (hasActiveQuestion()) return true;
+
+            const target = video.duration * 0.99;
+            // 跳到99%（3秒防抖避免闪烁）
+            if (video.currentTime < target - 1 && Date.now() - lastSeekAt > 3000) {
+                lastSeekAt = Date.now();
+                seekForward(video, target);
+            }
+            // 已达99%：1.0x匀速跑完最后1%（对外显示本来就是1.0x，无检测风险）
+            // jumpToTime API不可用时退为8x播放，靠自然播放推进（看门狗安全上限）
+            const rate = video.currentTime >= target - 1 ? 1.0 : 8.0;
+            originalDescriptor.set.call(video, rate);
+            const cp = window.cc_js_Player;
+            if (cp && cp.setPlaybackRate) {
+                cp.setPlaybackRate(rate);
+            }
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
     function applyPlaybackSpeed(type) {
         try {
             const video = document.querySelector('video');
+
+            // 🔥 v1.5：时间差已达标 → 跳到99%匀速跑完，不再套用倍速
+            if (handleCompletionPass(video)) {
+                return;
+            }
 
             if (video) {
                 // 使用原始 setter 直接设置（绕过我们的劫持）
@@ -352,23 +516,69 @@
     }
 
     function saveCourseList() {
-        const courses = [];
-        const items = document.querySelectorAll('.lis-inside-content, .r .lis, a[onclick*="cwid"]');
+        // 🔥 v1.5：记录列表页所在目录，用于把课程项里的相对链接解析成绝对地址
+        try {
+            const listBase = location.origin + location.pathname.substring(0, location.pathname.lastIndexOf('/') + 1);
+            localStorage.setItem('huayi_course_list_base', listBase);
 
-        items.forEach((item, idx) => {
-            const title = item.querySelector('h2, h3, .title, a')?.textContent.trim();
-            const status = item.querySelector('button, .status')?.textContent.trim() || '未知';
-            const onclick = item.getAttribute('onclick') || item.querySelector('[onclick*="cwid"]')?.getAttribute('onclick');
-            const cwid = onclick?.match(/cwid=([^'"\)]+)/)?.[1];
-
-            if (cwid && title) {
-                courses.push({ title, status, cwid, index: idx });
+            // 课程首页带 cid 参数：记录 cid 与课程首页地址，供结束页兜底返回
+            const cid = new URLSearchParams(location.search).get('cid');
+            if (cid) {
+                localStorage.setItem('huayi_course_cid', cid);
+                localStorage.setItem('huayi_course_home', location.origin + location.pathname + '?cid=' + cid);
             }
+        } catch (e) {}
+
+        const courseMap = new Map(); // cwid -> 课程条目（自动去重）
+        let idx = 0;
+
+        const pushCourse = (title, status, cwid, url) => {
+            if (!cwid) return;
+            cwid = String(cwid).trim();
+            if (!cwid || courseMap.has(cwid)) return;
+            courseMap.set(cwid, {
+                title: (title || cwid).trim(),
+                status: (status || '未知').trim(),
+                cwid: cwid,
+                index: idx++,
+                url: (url || '').trim()
+            });
+        };
+
+        // 结构1：课程首页 course.aspx 的 .course[data-href]（data-href 含 ../course_ware/... 完整相对路径）
+        document.querySelectorAll('.course[data-href]').forEach(item => {
+            const url = item.getAttribute('data-href') || '';
+            const cwid = (url.match(/cwid=([^&'"\s]+)/) || [])[1];
+            const title = item.querySelector('.cw-title-link strong, .course-item-title strong, strong, h3')?.textContent;
+            const stateEl = item.querySelector('.cw-progress-row[data-studystate]');
+            const status = stateEl?.getAttribute('data-studystate') ||
+                           item.querySelector('.cw-status button, button')?.textContent || '未知';
+            pushCourse(title, status, cwid, url);
         });
+
+        // 结构2：课件页侧栏 li.lis-inside-content（onclick 内含 'course_ware.aspx?cwid=...' 相对链接）
+        document.querySelectorAll('.lis-inside-content').forEach(item => {
+            const onclick = item.getAttribute('onclick') || '';
+            const url = (onclick.match(/['"]([^'"]*course_ware\.aspx\?cwid=[^'"]+)['"]/) || [])[1] || '';
+            const cwid = (onclick.match(/cwid=([^&'"\)\s]+)/) || [])[1];
+            const title = item.querySelector('.cw-title-text, h2, h3, .title, a')?.textContent;
+            const status = item.querySelector('.cw-tag-row button, button, .status')?.textContent || '未知';
+            pushCourse(title, status, cwid, url);
+        });
+
+        // 结构3：兼容旧版页面结构
+        document.querySelectorAll('a[onclick*="cwid"], .r .lis').forEach(item => {
+            const onclick = item.getAttribute('onclick') || item.querySelector('[onclick*="cwid"]')?.getAttribute('onclick') || '';
+            const cwid = (onclick.match(/cwid=([^'"\)\s]+)/) || [])[1];
+            const title = item.querySelector('h2, h3, .title, a')?.textContent || item.textContent;
+            pushCourse(title, '未知', cwid, '');
+        });
+
+        const courses = Array.from(courseMap.values());
 
         if (courses.length > 0) {
             localStorage.setItem('huayi_course_list', JSON.stringify(courses));
-            console.log(`✅ 已保存 ${courses.length} 个课程`);
+            console.log(`✅ 已保存 ${courses.length} 个课程（含课件地址）`);
         }
     }
 
@@ -427,6 +637,7 @@
                 setPanelStatus('completed');
                 clearInterval(clock);
                 clearInterval(timeCheckInterval);
+                clearFirstPlay(new URLSearchParams(location.search).get('cwid'));
                 setTimeout(() => proceedToNext(), 2000);
             } else if (state == '待考试') {
                 console.log('📝 待考试状态,5秒后跳转');
@@ -439,6 +650,25 @@
         } catch (e) {
             console.log('状态检测错误:', e);
         }
+    }
+
+    // 🔥 v1.5：把课程条目解析成可跳转的课件地址
+    // 优先用列表页保存的原始链接（课程首页是 ../course_ware/...，课件侧栏是 course_ware.aspx?...），
+    // 按保存列表时的页面目录解析为绝对地址；其次用课件页目录缓存；
+    // 最后兜底 origin + /course_ware/（华医网课件固定目录，避免在 /pages/ 下拼出错误路径404）
+    function resolveCoursewareUrl(entry, player) {
+        const fileName = player === 'polyv' ? 'course_ware_polyv.aspx' : 'course_ware_cc.aspx';
+        const listBase = localStorage.getItem('huayi_course_list_base') || '';
+
+        if (entry && entry.url && listBase) {
+            try {
+                const abs = new URL(entry.url, listBase).href;
+                return abs.replace('course_ware.aspx', fileName);
+            } catch (e) {}
+        }
+
+        const base = localStorage.getItem('huayi_course_base') || (location.origin + '/course_ware/');
+        return `${base}${fileName}?cwid=${entry ? entry.cwid : ''}`;
     }
 
     function proceedToNext() {
@@ -487,19 +717,11 @@
         if (nextCourse) {
             console.log(`✅ 跳转到: ${nextCourse.title}`);
 
-            // 🔥 智能选择播放器
+            // 🔥 智能选择播放器（优先解析列表里保存的真实课件地址）
             const failedCC = safeParseJSON(localStorage.getItem('huayi_failed_cc'), []);
-            let url;
-
-            if (failedCC.includes(nextCourse.cwid)) {
-                // 该课程CC不可用，直接使用Polyv
-                console.log('→ 使用Polyv播放器（该课程CC不可用）');
-                url = `course_ware_polyv.aspx?cwid=${nextCourse.cwid}`;
-            } else {
-                // 优先尝试CC播放器（只传 cwid 参数）
-                console.log('→ 尝试使用CC播放器（支持倍速）');
-                url = `course_ware_cc.aspx?cwid=${nextCourse.cwid}`;
-            }
+            const player = failedCC.includes(nextCourse.cwid) ? 'polyv' : 'cc';
+            const url = resolveCoursewareUrl(nextCourse, player);
+            console.log(`→ 使用${player === 'polyv' ? 'Polyv' : 'CC'}播放器跳转: ${url}`);
 
             setTimeout(() => {
                 location.href = url;
@@ -705,16 +927,79 @@
             }
         };
 
+        // 🔥 v1.5：视频播完会跳转到 exam_result.aspx?cwid=xxx 结束页
+        // （页面可能显示"本课件已学习完毕"等文字）：标记当前课程完成并自动续播下一课
+        const cwid = new URLSearchParams(location.search).get('cwid');
+
+        // 🔥 v1.5 最后兜底：15秒后仍停留在结束页且本地存有课程首页地址 → 返回课程首页重新加载列表
+        const courseHome = localStorage.getItem('huayi_course_home');
+        setTimeout(() => {
+            if (urlTip == 'exam_result.aspx' && courseHome) {
+                console.log('⏰ 仍未离开结束页，返回课程首页重新加载课程列表');
+                location.href = courseHome;
+            }
+        }, 15000);
+
+        if (cwid) {
+            markCourseCompleted(cwid);
+            const courses = safeParseJSON(localStorage.getItem('huayi_course_list'), []);
+
+            if (courses.length > 0) {
+                // 只有存在未完成的下一课时才自动续播，否则走"立即学习"兜底
+                const currentIdx = courses.findIndex(c => c.cwid === cwid);
+                const isIncomplete = (status) => {
+                    if (!status) return true;
+                    const s = status.toLowerCase();
+                    return !s.includes('已完成') && !s.includes('完成');
+                };
+                const hasNext = courses.some((c, i) => i !== currentIdx && isIncomplete(c.status));
+
+                if (hasNext) {
+                    console.log('🎓 课件结束页，稍后自动续播下一课');
+                    setPanelStatus('completed');
+                    setTimeout(() => proceedToNext(), 2000);
+
+                    // 兜底：10秒后仍停留在本页，尝试点击"立即学习"
+                    setTimeout(() => {
+                        if (urlTip == 'exam_result.aspx') {
+                            console.log('⏰ 仍在结束页，点击"立即学习"兜底');
+                            clickLearn();
+                            setInterval(clickLearn, 30000);
+                        }
+                    }, 10000);
+                    return;
+                }
+            }
+        }
+
+        // 无cwid或无未完成课程时，退回原逻辑：定时点击"立即学习"
+        setPanelStatus('exam');
         setInterval(clickLearn, 30000);
         setTimeout(clickLearn, 2000);
+    }
+
+    // 在结束页标记当前课程已完成（同步课程列表缓存，并清除分天计时记录）
+    function markCourseCompleted(cwid) {
+        try {
+            const courses = safeParseJSON(localStorage.getItem('huayi_course_list'), []);
+            const course = courses.find(c => c.cwid === cwid);
+            if (course && !course.status.includes('已完成')) {
+                course.status = '已完成';
+                localStorage.setItem('huayi_course_list', JSON.stringify(courses));
+                console.log(`✅ 已标记课程完成: ${course.title}`);
+            }
+            // 课程已完成，清除分天计时记录（日后重修时重新计时）
+            clearFirstPlay(cwid);
+        } catch (e) {}
     }
 
     // ==================== 🔥 视频中途弹题自动作答 ====================
     // 检测 CC 播放器播放中途出现的答题弹窗（.ccQuestionBox）：
     // 1. 自动模拟真人点击选择答案（判断题优先选"正确"）并点击"提交"
-    // 2. 提交后验证弹窗是否消失、视频是否恢复；答错自动换下一个选项
+    // 2. 答对点"继续播放"（#rightBtn）；答错点"回看知识点"（#wrongBtn），
+    //    弹题几秒后重现，自动换未试过的选项重答
     // 3. 错误答案记录到 localStorage，下次遇到同一题直接避开
-    // 4. 所有选项都失败时，强制点击隐藏的"跳过"按钮兜底并恢复播放
+    // 4. 所有选项都失败时，强制点击隐藏的"跳过"按钮（#ccJumpOver）兜底并恢复播放
 
     function setupAutoAnswer() {
         const ATTEMPTS_KEY = 'huayi_question_attempts';
@@ -767,6 +1052,79 @@
                 el.dispatchEvent(new MouseEvent('mouseup', base));
                 el.dispatchEvent(new MouseEvent('click', base));
             } catch (e) {}
+        }
+
+        // 🔥 v1.5：CC弹题结果浮层（真实DOM结构）
+        // 答错：.ccWrongTips 内 #wrongBtn(回看知识点，可见) / #questionscontinueBtn(继续播放，隐藏)
+        //       → 点"回看知识点"回到视频，几秒后弹题重现，用未试过的选项重答
+        // 答对：.ccRightTips 内 #questionBackBtn(回看知识点) / #rightBtn(继续播放，可见)
+        //       → 点"继续播放"恢复正常播放
+        const RESULT_WORDS = ['返回', '继续', '确定', '知道了', '我知道了', '重新作答', '继续答题'];
+
+        function findResultButtons(scope) {
+            try {
+                return Array.from((scope || document).querySelectorAll(
+                    'button, a, .btn, [role="button"], span[onclick], div[onclick], input[type="button"], input[type="submit"]'
+                )).filter(el => {
+                    if (el.id === 'ccQuestionSubmit') return false; // 排除提交按钮
+                    const text = (el.textContent || el.value || '').trim();
+                    return text && RESULT_WORDS.some(w => text.includes(w)) && isElementVisible(el);
+                });
+            } catch (e) {
+                return [];
+            }
+        }
+
+        // 检测结果浮层状态：'right' | 'wrong' | null
+        function detectResult(box) {
+            try {
+                const right = box?.querySelector('.ccRightTips');
+                if (right && isElementVisible(right)) return 'right';
+                const wrong = box?.querySelector('.ccWrongTips');
+                if (wrong && isElementVisible(wrong)) return 'wrong';
+            } catch (e) {}
+            return null;
+        }
+
+        // 点击结果浮层对应的按钮（返回命中的状态，未命中返回 null）
+        function clickResultButton(box) {
+            const root = box || document;
+            const state = detectResult(root);
+
+            if (state === 'right') {
+                const btn = root.querySelector('#rightBtn');
+                if (btn) {
+                    console.log('▶️ 弹题回答正确，点击"继续播放"');
+                    clickLikeHuman(btn);
+                    return 'right';
+                }
+            }
+
+            if (state === 'wrong') {
+                const backBtn = root.querySelector('#wrongBtn'); // "回看知识点"
+                const contBtn = root.querySelector('#questionscontinueBtn'); // 隐藏的"继续播放"
+                if (backBtn) {
+                    console.log('🔙 弹题答错，点击"回看知识点"（弹题稍后重现，自动换选项重答）');
+                    clickLikeHuman(backBtn);
+                    return 'wrong';
+                }
+                if (contBtn) { // 兜底：强制显示隐藏的"继续播放"
+                    contBtn.style.display = 'inline-block';
+                    contBtn.style.visibility = 'visible';
+                    console.log('▶️ 点击隐藏的"继续播放"按钮');
+                    clickLikeHuman(contBtn);
+                    return 'wrong';
+                }
+            }
+
+            // 通用兜底：按文案匹配（其它弹题UI）
+            const btns = findResultButtons(root);
+            if (btns.length) {
+                console.log(`🔙 点击结果按钮: ${btns[0].textContent.trim()}`);
+                clickLikeHuman(btns[0]);
+                return state || 'fallback';
+            }
+            return null;
         }
 
         function selectOption(box, idx) {
@@ -838,10 +1196,24 @@
             return 1;
         }
 
+        // 结果按钮点击节流（防止1秒轮询重复点击"回看知识点/继续播放"）
+        let lastResultClick = 0;
+
         function handleQuestion() {
             if (handling) return;
             const box = getQuestionBox();
             if (!box) return;
+
+            // 🔥 v1.5：处于上次作答的结果浮层 → 先点对应按钮恢复（3秒节流防重复点击）
+            const pending = detectResult(box);
+            if (pending && Date.now() - lastResultClick > 3000) {
+                lastResultClick = Date.now();
+                clickResultButton(box);
+                resumeVideo();
+                return;
+            } else if (pending) {
+                return; // 节流窗口内，等待浮层消失/弹题重现
+            }
 
             const info = getQuestionInfo(box);
             if (!info.options.length) return;
@@ -854,7 +1226,8 @@
             // 生成作答计划：每项是一个"本轮选择的选项下标数组"
             let plans;
             if (isMulti) {
-                plans = [info.options.map((o, i) => i)]; // 多选：全选提交
+                // 多选：全选提交一次；若之前已试错过（wrongList非空）则不再重试，交给跳过兜底
+                plans = wrongList.length ? [null] : [info.options.map((o, i) => i)];
             } else {
                 let idxs = info.options
                     .map((o, i) => i)
@@ -873,7 +1246,26 @@
                     return;
                 }
 
-                const curBox = getQuestionBox() || box;
+                let curBox = getQuestionBox();
+
+                // 🔥 v1.5：弹窗已被"返回/继续"关闭 → 交回轮询，若再次弹出会用新的错题记录重答
+                if (!curBox) {
+                    handling = false;
+                    resumeVideo();
+                    return;
+                }
+
+                // 🔥 v1.5：处于结果浮层且无选项（其它弹题UI）→ 先点对应按钮恢复题目
+                if (!getQuestionInfo(curBox).options.length) {
+                    if (clickResultButton(curBox)) {
+                        lastResultClick = Date.now();
+                        setTimeout(() => tryNext(round), 600);
+                    } else {
+                        forceSkip(curBox);
+                    }
+                    return;
+                }
+
                 plan.forEach(i => selectOption(curBox, i));
 
                 setTimeout(() => {
@@ -895,11 +1287,30 @@
                             console.log('✅ 弹题处理完成，继续播放视频');
                             handling = false;
                             resumeVideo();
-                        } else {
-                            console.log('❌ 答案不正确，准备换下一个选项');
+                            return;
+                        }
+
+                        const result = stillBox ? detectResult(stillBox) : null;
+                        if (result === 'right') {
+                            // 🎉 答对：点"继续播放"恢复正常播放
+                            lastResultClick = Date.now();
+                            clickResultButton(stillBox);
+                            handling = false;
+                            resumeVideo();
+                        } else if (result === 'wrong') {
+                            // ❌ 答错：记录错题 → 点"回看知识点" → 弹题重现后用未试过的选项重答
+                            console.log('❌ 弹题答错');
                             if (!isMulti && plan.length === 1) {
                                 markWrong(info.text, [info.options[plan[0]].label]);
+                            } else if (isMulti) {
+                                markWrong(info.text, plan.map(i => info.options[i].label));
                             }
+                            lastResultClick = Date.now();
+                            clickResultButton(stillBox);
+                            handling = false; // 交回轮询：弹题重现后自动换选项
+                            resumeVideo();
+                        } else {
+                            // 无结果浮层（可能未提交成功）→ 换下一个计划重试
                             tryNext(round + 1);
                         }
                     }, 2000);
@@ -940,17 +1351,62 @@
         panel.style.cssText = `
             position: fixed; top: 20px; right: 20px; width: 40px; height: 40px;
             background: #4CAF50; border-radius: 50%; box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-            z-index: 99999; cursor: pointer;
+            z-index: 99999; cursor: pointer; user-select: none; -webkit-user-select: none;
             display: flex; align-items: center; justify-content: center;
             font-size: 20px; color: white; overflow: hidden;
         `;
 
         document.body.appendChild(panel);
 
-        panel.onclick = (e) => {
-            e.stopPropagation();
-            togglePanel();
-        };
+        // 🔥 v1.5：悬浮球支持拖动（拖动阈值5px，未拖动视为点击展开/收起；位置自动记忆）
+        const BALL_POS_KEY = 'huayi_ball_pos';
+        try {
+            const saved = JSON.parse(localStorage.getItem(BALL_POS_KEY) || 'null');
+            if (saved && typeof saved.left === 'number' && typeof saved.top === 'number') {
+                panel.style.left = saved.left + 'px';
+                panel.style.top = saved.top + 'px';
+                panel.style.right = 'auto';
+            }
+        } catch (e) {}
+
+        const drag = { active: false, moved: false, sx: 0, sy: 0, ox: 0, oy: 0 };
+        panel.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return;
+            drag.active = true;
+            drag.moved = false;
+            drag.sx = e.clientX;
+            drag.sy = e.clientY;
+            const r = panel.getBoundingClientRect();
+            drag.ox = r.left;
+            drag.oy = r.top;
+            e.preventDefault();
+        });
+        document.addEventListener('mousemove', (e) => {
+            if (!drag.active) return;
+            const dx = e.clientX - drag.sx;
+            const dy = e.clientY - drag.sy;
+            if (!drag.moved && Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
+            drag.moved = true;
+            const left = Math.min(Math.max(0, drag.ox + dx), window.innerWidth - panel.offsetWidth);
+            const top = Math.min(Math.max(0, drag.oy + dy), window.innerHeight - panel.offsetHeight);
+            panel.style.left = left + 'px';
+            panel.style.top = top + 'px';
+            panel.style.right = 'auto';
+        });
+        document.addEventListener('mouseup', () => {
+            if (!drag.active) return;
+            drag.active = false;
+            if (drag.moved) {
+                try {
+                    localStorage.setItem(BALL_POS_KEY, JSON.stringify({
+                        left: parseInt(panel.style.left, 10) || 0,
+                        top: parseInt(panel.style.top, 10) || 0
+                    }));
+                } catch (e) {}
+            } else {
+                togglePanel(); // 没有产生拖动 → 视为点击
+            }
+        });
 
         document.onclick = (e) => {
             const panel = document.getElementById('huayi-panel');
@@ -962,6 +1418,42 @@
 
     function togglePanel() {
         isExpanded ? collapsePanel() : expandPanel();
+    }
+
+    // 🔥 v1.5：datetime-local 输入框格式化
+    function formatDateTimeLocal(ms) {
+        const d = new Date(ms);
+        const pad = n => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+
+    // 🔥 v1.5：计算分天策略状态文案（浮窗显示用）
+    function computeFinishStateText() {
+        try {
+            const v = document.querySelector('video');
+            const cwid = new URLSearchParams(location.search).get('cwid');
+            const hasExact = !!(cwid && getFirstPlayMap()[cwid]);
+            const first = getFirstPlayTime(cwid);
+            if (urlTip.includes('course_ware') && v && v.duration && !isNaN(v.duration)) {
+                const tag = hasExact ? '' : '(默认首播)';
+                if (!first) {
+                    return '🕒 首次播放：95%保护跳转（计时起点已记录）';
+                } else if (Date.now() - first >= v.duration * 1000) {
+                    return `✅ 时间已达标${tag}：将直接跳到99%匀速跑完`;
+                } else {
+                    const waitMin = Math.ceil((v.duration * 1000 - (Date.now() - first)) / 60000);
+                    return `⏳ 时间未达标${tag}：还需等待约${waitMin}分钟（95%保护）`;
+                }
+            }
+        } catch (e) {}
+        return '';
+    }
+
+    // 更新浮窗"分天策略"状态行
+    function updateFinishStateLine() {
+        const el = document.getElementById('huayiFinishState');
+        const text = computeFinishStateText();
+        if (el && text) el.innerHTML = `分天策略: ${text}`;
     }
 
     function expandPanel() {
@@ -999,10 +1491,17 @@
         const jumpTime = isNormalSpeed ? 240 : Math.round(240 / currentSpeed);
         const speedModeText = isNormalSpeed ? '正常速度 (播放完等待5秒)' : `倍速 ${currentSpeed}x (剩余${jumpTime}秒跳转)`;
 
+        // 🔥 v1.5：分天策略状态（时间差是否已达标，支持默认首播时间）
+        const finishStateText = computeFinishStateText();
+        // 🔥 v1.5：默认首次观看时间（老用户补录）
+        const savedDefault = parseInt(localStorage.getItem('huayi_default_first_play'), 10);
+        const defaultFirstPlayValue = isNaN(savedDefault) ? '' : formatDateTimeLocal(savedDefault);
+
         panel.innerHTML = `
             <div style="font-weight: bold; margin-bottom: 8px;">🛡️ 华医网视频播放脚本 Pro</div>
             <div style="margin-bottom: 4px;">状态: ${statusMap[status]}</div>
             <div style="margin-bottom: 4px; font-size: 10px; opacity: 0.9;">播放模式: ${speedModeText}</div>
+            ${finishStateText ? `<div id="huayiFinishState" style="margin-bottom: 4px; font-size: 10px; opacity: 0.9;">分天策略: ${finishStateText}</div>` : ''}
             <div style="margin-bottom: 4px; font-size: 10px; opacity: 0.9;">播放器: ${playerType}</div>
             ${current ? `<div style="font-size: 10px; opacity: 0.8;">当前: ${current.title.substring(0,16)}...</div>` : ''}
             <div style="font-size: 10px; opacity: 0.8; margin-top: 4px;">课程数: ${courses.length} | CC失败: ${failedCC.length}</div>
@@ -1029,8 +1528,25 @@
                 🔄 清除CC失败记录
             </button>
 
+            <div style="width: 100%; margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.3);">
+                <div style="font-weight: bold; margin-bottom: 6px;">🕒 默认首次观看时间（老用户补录）</div>
+                <input id="defaultFirstPlayInput" type="datetime-local" value="${defaultFirstPlayValue}"
+                    style="width: 100%; padding: 3px 4px; border-radius: 4px; border: none; font-size: 10px; color: #333; box-sizing: border-box;">
+                <div style="display: flex; gap: 6px; margin-top: 4px;">
+                    <button id="setDefaultFirstPlayBtn" style="flex: 1; padding: 4px; background: rgba(255,255,255,0.25);
+                        border: 1px solid rgba(255,255,255,0.5); color: white; border-radius: 4px; cursor: pointer; font-size: 10px;">
+                        设置
+                    </button>
+                    <button id="clearDefaultFirstPlayBtn" style="flex: 1; padding: 4px; background: rgba(255,255,255,0.15);
+                        border: 1px solid rgba(255,255,255,0.3); color: white; border-radius: 4px; cursor: pointer; font-size: 10px;">
+                        清除
+                    </button>
+                </div>
+                <div style="font-size: 9px; opacity: 0.7; margin-top: 4px;">之前手动看过的课，填当时开始看的时间，二刷逻辑立即生效</div>
+            </div>
+
             <div style="font-size: 9px; opacity: 0.7; margin-top: 8px; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.2);">
-                ✅ 智能切换播放器 ✅ 自动回退 ✅ 防检测倍速<br>✅ 智能跳转逻辑 ✅ 自动处理CC签到 ✅ 弹题自动作答
+                ✅ 智能切换播放器 ✅ 自动回退 ✅ 防检测倍速<br>✅ 智能跳转逻辑 ✅ 自动处理CC签到 ✅ 弹题自动作答<br>✅ 分天时间达标100%完成 ✅ 结束页自动续播
             </div>
         `;
 
@@ -1057,6 +1573,33 @@
             localStorage.removeItem('huayi_failed_cc');
             console.log('✅ 已清除CC失败记录');
             expandPanel(); // 刷新面板
+        });
+
+        // 🔥 v1.5：绑定默认首次观看时间设置（老用户补录）
+        document.getElementById('setDefaultFirstPlayBtn')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const input = document.getElementById('defaultFirstPlayInput');
+            const val = input?.value;
+            if (!val) { alert('请先选择日期和时间'); return; }
+            const ms = new Date(val).getTime();
+            if (isNaN(ms)) { alert('时间格式无效'); return; }
+            if (ms > Date.now()) { alert('首次观看时间不能晚于当前时间'); return; }
+            localStorage.setItem('huayi_default_first_play', String(ms));
+            // 🔥 关键：清除已有的精确首播记录，否则旧记录优先级更高，默认时间不生效
+            localStorage.removeItem('huayi_first_play');
+            console.log(`🕒 已设置默认首次观看时间: ${new Date(ms).toLocaleString()}（已清除所有课程的精确首播记录，默认时间立即生效）`);
+            updateFinishStateLine();
+            e.target.textContent = '已设置';
+            setTimeout(() => { const b = document.getElementById('setDefaultFirstPlayBtn'); if (b) b.textContent = '设置'; }, 1500);
+        });
+
+        document.getElementById('clearDefaultFirstPlayBtn')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            localStorage.removeItem('huayi_default_first_play');
+            const input = document.getElementById('defaultFirstPlayInput');
+            if (input) input.value = '';
+            console.log('🗑️ 已清除默认首次观看时间（新课程将重新按首播计时）');
+            updateFinishStateLine();
         });
     }
 
