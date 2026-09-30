@@ -3,6 +3,8 @@
 
 ![example](./assets/example.webp)
 
+2026/09/30 v1.4 新增中途弹题自动作答：检测CC播放器弹题弹窗，模拟真人点击作答（判断题优先选"正确"），答错自动换选项，错题记忆避免重复踩坑，全部失败自动点击隐藏"跳过"按钮兜底；同时新增匹配 bokecc.com 域名，弹题期间不再强制恢复播放；
+
 2025/11/30 v1.3 强制切换到CC播放器，增加倍速功能与使用方法（注意最终等待的自然时长必须为1.0倍速的时长）；
 
 2025/11/30 v1.2 自动跳转视频太慢，精简了业务逻辑；
@@ -39,7 +41,13 @@
    - 智能跳转逻辑（正常速度播放完等待5秒，倍速模式剩余240秒跳转）
    - 自动处理签到弹窗（10种弹窗类型）
    - 静音播放 + 用户行为模拟
-4. **课程管理**  
+4. **中途弹题自动作答（v1.4 新增）**  
+   - 检测CC播放器播放中途的答题弹窗（`.ccQuestionBox`）
+   - 模拟真人点击（mousedown → mouseup → click）选择答案并提交
+   - 判断题优先选"正确"，答错自动换下一个选项重试
+   - 错误答案记入 localStorage，下次遇到同一题直接避开
+   - 所有选项都失败时，强制点击隐藏的"跳过"按钮兜底并恢复播放
+5. **课程管理**  
    - 自动保存课程列表
    - 显示当前课程进度
    - 支持手动跳转下一课
@@ -87,9 +95,10 @@ graph TD
 ---
 #### 🔧 技术实现
 - **播放器劫持**：在`document-start`阶段劫持`HTMLMediaElement.prototype.playbackRate`
-- **智能检测**：结合URL路径+DOM元素识别播放器类型
+- **智能检测**：结合URL路径+DOM元素识别播放器类型（脚本同时匹配`91huayi.com`与`bokecc.com`域名）
 - **防检测机制**：`getOwnPropertyDescriptor`劫持隐藏修改痕迹
 - **弹窗处理**：jQuery+原生JS双通道检测（2秒/次高频扫描）
+- **弹题作答**：1秒轮询 + MutationObserver即时检测（500ms节流），错题记录localStorage持久化，答错自动换选
 ```javascript
 // 核心防检测代码示例
 Object.defineProperty(HTMLMediaElement.prototype, 'playbackRate', {
@@ -103,6 +112,7 @@ Object.defineProperty(HTMLMediaElement.prototype, 'playbackRate', {
 2. 倍速模式跳转阈值 = 240秒 ÷ 当前倍速
 3. 考试页面自动点击“立即学习”
 4. 刷脸认证页面每5分钟自动刷新
+5. 中途弹题全自动作答：判断题优先选“正确”，答错自动换选项；错题记录存于 localStorage（`huayi_question_attempts`），可在控制台清除后重置
 > 💡 提示：使用分天策略可100%避免时长异常，证书申领更安全
 
 --------------------------------

@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      1.3
-// @description  该油猴脚本用于华医网的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗
+// @version      1.4
+// @description  该油猴脚本用于华医网的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
+// @match        *://*.bokecc.com/*
 // @grant        none
 // @license      MIT
 // @run-at       document-start
@@ -182,6 +183,9 @@
     }
 
     function init() {
+        // 🔥 新增：中途弹题自动作答（所有页面/iframe 都启用）
+        setupAutoAnswer();
+
         createPanel();
 
         if (urlTip.includes('course_ware')) {
@@ -583,7 +587,13 @@
                 const video = $('video').get(0);
                 const state = document.querySelector("i[id='top_play']")?.parentNode?.nextElementSibling?.nextElementSibling?.nextElementSibling?.innerText;
 
-                if (video?.paused && state != '已完成' && state != '待考试') {
+                // 🔥 新增：弹题期间不强制恢复播放，交给弹题自动作答模块处理
+                let questionVisible = false;
+                try {
+                    questionVisible = Array.from(document.querySelectorAll('.ccQuestionBox')).some(el => isElementVisible(el));
+                } catch (e) {}
+
+                if (video?.paused && !questionVisible && state != '已完成' && state != '待考试') {
                     video.play();
                     video.muted = true;
                 }
@@ -699,6 +709,227 @@
         setTimeout(clickLearn, 2000);
     }
 
+    // ==================== 🔥 视频中途弹题自动作答 ====================
+    // 检测 CC 播放器播放中途出现的答题弹窗（.ccQuestionBox）：
+    // 1. 自动模拟真人点击选择答案（判断题优先选"正确"）并点击"提交"
+    // 2. 提交后验证弹窗是否消失、视频是否恢复；答错自动换下一个选项
+    // 3. 错误答案记录到 localStorage，下次遇到同一题直接避开
+    // 4. 所有选项都失败时，强制点击隐藏的"跳过"按钮兜底并恢复播放
+
+    function setupAutoAnswer() {
+        const ATTEMPTS_KEY = 'huayi_question_attempts';
+        let handling = false;
+
+        function getAttempts() {
+            return safeParseJSON(localStorage.getItem(ATTEMPTS_KEY), {}) || {};
+        }
+
+        function markWrong(question, labels) {
+            try {
+                const map = getAttempts();
+                const list = map[question] || [];
+                labels.forEach(l => { if (l && !list.includes(l)) list.push(l); });
+                map[question] = list;
+                localStorage.setItem(ATTEMPTS_KEY, JSON.stringify(map));
+                console.log(`📝 已记录错误答案: ${labels.join('、')}`);
+            } catch (e) {}
+        }
+
+        function getQuestionBox() {
+            const boxes = document.querySelectorAll('.ccQuestionBox');
+            for (const box of boxes) {
+                if (isElementVisible(box)) return box;
+            }
+            return null;
+        }
+
+        function getQuestionInfo(box) {
+            const text = (box.querySelector('.ccProblem .text')?.textContent ||
+                          box.querySelector('.ccProblem')?.textContent || '').trim();
+            const type = (box.querySelector('.ccCheckTips')?.textContent || '').trim();
+            const options = Array.from(box.querySelectorAll('.ccQuestionList li')).map(li => ({
+                li: li,
+                label: (li.querySelector('span')?.textContent || li.textContent || '').trim()
+            }));
+            return { text: text, type: type, options: options };
+        }
+
+        // 模拟真实鼠标点击（mousedown → mouseup → click）
+        function clickLikeHuman(el) {
+            try {
+                const rect = el.getBoundingClientRect();
+                const base = {
+                    view: window, bubbles: true, cancelable: true,
+                    clientX: rect.left + rect.width / 2,
+                    clientY: rect.top + rect.height / 2
+                };
+                el.dispatchEvent(new MouseEvent('mousedown', base));
+                el.dispatchEvent(new MouseEvent('mouseup', base));
+                el.dispatchEvent(new MouseEvent('click', base));
+            } catch (e) {}
+        }
+
+        function selectOption(box, idx) {
+            const info = getQuestionInfo(box);
+            const opt = info.options[idx];
+            if (!opt) return;
+
+            // 1. 点击选项行 / 单选图标
+            clickLikeHuman(opt.li);
+            const icon = opt.li.querySelector('i.radioBg') || opt.li.querySelector('i');
+            if (icon) clickLikeHuman(icon);
+
+            // 2. 同步勾选隐藏的 radio/checkbox 输入框
+            const inputs = box.querySelectorAll('.ccInputBox input');
+            const input = inputs[idx];
+            if (input) {
+                try {
+                    input.checked = true;
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                    input.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                } catch (e) {}
+            }
+            console.log(`🖊️ 已选择选项: ${opt.label}`);
+        }
+
+        function resumeVideo() {
+            try {
+                const video = document.querySelector('video');
+                if (video && video.paused) {
+                    video.play();
+                    video.muted = true;
+                }
+                if (typeof cc_js_Player !== 'undefined' && cc_js_Player.play) {
+                    cc_js_Player.play();
+                }
+            } catch (e) {}
+        }
+
+        function isVideoPlaying() {
+            const video = document.querySelector('video');
+            return !!(video && !video.paused && !video.ended);
+        }
+
+        function forceSkip(box) {
+            console.log('⏭️ 尝试点击"跳过"按钮兜底');
+            const skip = document.getElementById('ccJumpOver') ||
+                         (box && box.querySelector('#ccJumpOver'));
+            if (skip) {
+                skip.style.display = 'inline-block';
+                skip.style.visibility = 'visible';
+                clickLikeHuman(skip);
+                setTimeout(() => {
+                    if (getQuestionBox() && box) box.style.display = 'none';
+                    handling = false;
+                    resumeVideo();
+                }, 800);
+            } else {
+                if (box) box.style.display = 'none';
+                handling = false;
+                resumeVideo();
+            }
+        }
+
+        // 判断题默认优先选"正确"类选项
+        function answerScore(label) {
+            if (/正确|^是|^对/.test(label) && !/不正|错误|不对/.test(label)) return 2;
+            if (/错误|不对|否/.test(label)) return 0;
+            return 1;
+        }
+
+        function handleQuestion() {
+            if (handling) return;
+            const box = getQuestionBox();
+            if (!box) return;
+
+            const info = getQuestionInfo(box);
+            if (!info.options.length) return;
+            handling = true;
+            console.log(`❓ 检测到中途弹题 [${info.type || '单选'}]: ${info.text}`);
+
+            const isMulti = info.type.indexOf('多选') !== -1;
+            const wrongList = getAttempts()[info.text] || [];
+
+            // 生成作答计划：每项是一个"本轮选择的选项下标数组"
+            let plans;
+            if (isMulti) {
+                plans = [info.options.map((o, i) => i)]; // 多选：全选提交
+            } else {
+                let idxs = info.options
+                    .map((o, i) => i)
+                    .filter(i => wrongList.indexOf(info.options[i].label) === -1);
+                idxs.sort((a, b) => answerScore(info.options[b].label) - answerScore(info.options[a].label));
+                plans = idxs.map(i => [i]);
+            }
+            if (!plans.length) plans = [null]; // 全部选项都失败过 → 直接跳过
+
+            tryNext(0);
+
+            function tryNext(round) {
+                const plan = plans[round];
+                if (plan === null || plan === undefined) {
+                    forceSkip(getQuestionBox() || box);
+                    return;
+                }
+
+                const curBox = getQuestionBox() || box;
+                plan.forEach(i => selectOption(curBox, i));
+
+                setTimeout(() => {
+                    const submitBtn = document.getElementById('ccQuestionSubmit') ||
+                                      curBox.querySelector('#ccQuestionSubmit');
+                    if (submitBtn && isElementVisible(submitBtn)) {
+                        clickLikeHuman(submitBtn);
+                        console.log('📤 已提交答案，等待判题...');
+                    } else {
+                        forceSkip(getQuestionBox() || curBox);
+                        return;
+                    }
+
+                    setTimeout(() => {
+                        const stillBox = getQuestionBox();
+                        const answered = !stillBox || isVideoPlaying();
+                        if (answered) {
+                            if (stillBox) stillBox.style.display = 'none'; // 清理残留弹窗
+                            console.log('✅ 弹题处理完成，继续播放视频');
+                            handling = false;
+                            resumeVideo();
+                        } else {
+                            console.log('❌ 答案不正确，准备换下一个选项');
+                            if (!isMulti && plan.length === 1) {
+                                markWrong(info.text, [info.options[plan[0]].label]);
+                            }
+                            tryNext(round + 1);
+                        }
+                    }, 2000);
+                }, 500);
+            }
+        }
+
+        // 定时轮询检测（1秒一次）
+        setInterval(handleQuestion, 1000);
+
+        // DOM 变化即时检测（节流 500ms，加快响应）
+        let lastMut = 0;
+        const startObserve = () => {
+            if (document.body) {
+                new MutationObserver(() => {
+                    const now = Date.now();
+                    if (now - lastMut > 500) {
+                        lastMut = now;
+                        setTimeout(handleQuestion, 60);
+                    }
+                }).observe(document.body, { childList: true, subtree: true });
+            } else {
+                setTimeout(startObserve, 200);
+            }
+        };
+        startObserve();
+
+        console.log('✅ 中途弹题自动作答模块已启动');
+    }
+
 // ==================== UI ====================
 
     function createPanel() {
@@ -799,7 +1030,7 @@
             </button>
 
             <div style="font-size: 9px; opacity: 0.7; margin-top: 8px; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.2);">
-                ✅ 智能切换播放器 ✅ 自动回退 ✅ 防检测倍速<br>✅ 智能跳转逻辑 ✅ 自动处理CC签到
+                ✅ 智能切换播放器 ✅ 自动回退 ✅ 防检测倍速<br>✅ 智能跳转逻辑 ✅ 自动处理CC签到 ✅ 弹题自动作答
             </div>
         `;
 
