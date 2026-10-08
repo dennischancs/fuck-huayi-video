@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      1.5
-// @description  该油猴脚本用于华医网的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课
+// @version      1.7
+// @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅支持 91huayi.com 与 cme.szyxjxjy.cn
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
 // @match        *://*.bokecc.com/*
+// @match        *://*.szyxjxjy.cn/*
 // @grant        none
 // @license      MIT
 // @run-at       document-start
@@ -18,6 +19,49 @@
 
 (function () {
     'use strict';
+
+    // ==================== 🌐 v1.6：站点识别（同时支持华医网与深圳卫健继教平台） ====================
+    // 两者均使用 bokecc.com 的 CC 播放器（h5player-3.6.2.js），但页面/URL/状态指示结构不同：
+    //   91huayi.com:  播放页 course_ware_cc.aspx?cwid=X       列表页 course.aspx?cid=X       状态 i#top_play 父节点兄弟节点文案
+    //   szyxjxjy.cn:  播放页 /pages/courseware/ccPlay.html?cwid=X&ol=Y&cid=Z   列表页 /pages/casePage.html?cid=X&ol=Y   状态 #exam 按钮去掉 notClick 类即完成
+    const SITE = (function () {
+        const host = location.hostname || '';
+        const path = location.pathname || '';
+        const isSzyx = host.indexOf('szyxjxjy.cn') !== -1;
+        return {
+            isSzyx: isSzyx,
+            isHuayi: !isSzyx, // bokecc.com / 91huayi.com 走原华医逻辑
+            path: path,
+            playPageName: isSzyx ? 'ccPlay.html' : 'course_ware_cc.aspx',
+            polyvPageName: isSzyx ? 'polyvPlay.html' : 'course_ware_polyv.aspx',
+            listPageName: isSzyx ? 'casePage.html' : 'course.aspx',
+            playDir: isSzyx ? '/pages/courseware/' : '/course_ware/',
+            isPlayPage: function () { return path.indexOf(isSzyx ? 'ccPlay.html' : 'course_ware') !== -1; },
+            isPolyvPage: function () { return path.indexOf(isSzyx ? 'polyvPlay' : 'polyv') !== -1; },
+            isListPage: function () { return path.indexOf(isSzyx ? 'casePage.html' : 'course.aspx') !== -1 || path.indexOf('cme.aspx') !== -1; },
+            isExamResultPage: function () {
+                // 华医网：exam_result.aspx 是课件结束页（自动续播）
+                // szyxjxjy.cn：exam.html 是真实考试页、coursewareEvaluation.html 是课件评价页
+                //   均需用户手动操作，脚本不自动处理（避免干扰答题）
+                if (isSzyx) return false;
+                return path.indexOf('exam_result.aspx') !== -1;
+            },
+            // szyxjxjy.cn 的考试/评价页（用户手动操作，脚本只标记状态不干预）
+            isSzyxExamPage: function () { return isSzyx && (path.indexOf('exam.html') !== -1 || path.indexOf('coursewareEvaluation.html') !== -1); },
+            // 构建 CC 播放页 URL（szyxjxjy.cn 需要 cid+ol；华医只需 cwid）
+            buildPlayUrl: function (cwid, player) {
+                const fileName = player === 'polyv' ? this.polyvPageName : this.playPageName;
+                const base = location.origin + this.playDir + fileName;
+                if (this.isSzyx) {
+                    const params = new URLSearchParams(location.search);
+                    const cid = params.get('cid') || localStorage.getItem('huayi_course_cid') || '';
+                    const ol = params.get('ol') || '1';
+                    return `${base}?cwid=${cwid}&ol=${ol}&cid=${cid}`;
+                }
+                return `${base}?cwid=${cwid}`;
+            }
+        };
+    })();
 
     // ==================== 🛡️ v1.6：移除华医网反插件检测器 ====================
     // 页面在 document 上注册了合成点击检测器（e.isTrusted === false 时命中）：
@@ -44,6 +88,11 @@
 
     // ==================== 🔥 智能播放器切换逻辑 ====================
     (function smartPlayerSwitch() {
+        // 🌐 v1.6：深圳卫健继教平台（szyxjxjy.cn）只走 CC 播放器，无需 Polyv/CC 切换
+        if (SITE.isSzyx) {
+            console.log('🌐 深圳卫健继教平台：跳过 Polyv/CC 切换（直接使用 CC 播放器）');
+            return;
+        }
         const currentPath = window.location.pathname;
         const currentSearch = window.location.search;
         const urlParams = new URLSearchParams(currentSearch);
@@ -273,11 +322,16 @@
     }
 
     // 🔥 v1.5：课件页内嵌的 var cid（课程唯一标识，课程级考核用）
+    // 🌐 v1.6：szyxjxjy.cn 的 cid 直接在 URL 参数 ?cid=... 里（casePage/ccPlay 都是）
     let _courseCidCache;
     function getCourseCid() {
         if (_courseCidCache !== undefined) return _courseCidCache;
         _courseCidCache = null;
         try {
+            if (SITE.isSzyx) {
+                const cid = new URLSearchParams(location.search).get('cid');
+                if (cid) { _courseCidCache = cid.toLowerCase(); return _courseCidCache; }
+            }
             const m = document.documentElement.outerHTML.match(/var\s+cid\s*=\s*['"]([0-9a-f-]{16,})['"]/i);
             if (m) _courseCidCache = m[1].toLowerCase();
         } catch (e) {}
@@ -386,6 +440,45 @@
 
         createPanel();
 
+        // 🌐 v1.6：深圳卫健继教平台（szyxjxjy.cn）页面路由
+        if (SITE.isSzyx) {
+            if (SITE.isPlayPage()) {
+                // /pages/courseware/ccPlay.html?cwid=X&ol=Y&cid=Z
+                setPanelStatus('playing');
+                saveCourseList();
+                initVideo(2); // 该站只用 CC 播放器
+            } else if (SITE.isPolyvPage()) {
+                // /pages/courseware/polyvPlay.html（个别课程无 CC 版本时落地）
+                setPanelStatus('playing');
+                saveCourseList();
+                initVideo(1);
+            } else if (SITE.isListPage()) {
+                // /pages/casePage.html?cid=X&ol=Y 课程详情/列表页
+                setPanelStatus('list');
+                // 🌐 v1.6 fix: szyx casePage.html 通过 JS 动态渲染课件列表，
+                // DOMContentLoaded 时 dl.lisInside-case 尚未注入，需延迟重试 saveCourseList
+                const trySaveList = (attempt) => {
+                    saveCourseList();
+                    if (!localStorage.getItem('huayi_course_list') && attempt < 5) {
+                        setTimeout(() => trySaveList(attempt + 1), 1000);
+                    }
+                };
+                setTimeout(() => trySaveList(0), 500);
+                setTimeout(() => location.reload(), 5 * 60 * 1000);
+            } else if (SITE.isSzyxExamPage()) {
+                // /pages/courseware/exam.html（真实考试）或 coursewareEvaluation.html（课件评价）
+                // 用户手动操作，脚本不干预，仅标记状态
+                // coursewareEvaluation.html 的 cid 参数即 course_ware_id，标记完成便于浮窗显示
+                setPanelStatus('exam');
+                const params = new URLSearchParams(location.search);
+                const cwid = params.get('cwid') || params.get('cid');
+                if (cwid) markCourseCompleted(cwid);
+            } else {
+                setPanelStatus('error');
+            }
+            return;
+        }
+
         if (urlTip.includes('course_ware')) {
             setPanelStatus('playing');
             saveCourseList();
@@ -414,9 +507,13 @@
         blockPopups();
         simulateUserActivity();
 
-        window.onload = () => {
+        // 🌐 v1.6：用 addEventListener 而非 window.onload=...
+        // szyxjxjy.cn 的 ccPlay.html 自己设置了 window.onload（内部调用 initStudyCourseWare 创建播放器），
+        // 若用 window.onload= 会被页面覆盖，导致 3 秒状态轮询永远不启动、检测不到 #exam 启用。
+        // addEventListener('load', ...) 不覆盖页面处理函数，两站兼容。
+        window.addEventListener('load', () => {
             clock = setInterval(checkVideoStatus, 3000);
-        };
+        });
 
         setTimeout(() => {
             try {
@@ -667,7 +764,16 @@
             const cid = new URLSearchParams(location.search).get('cid');
             if (cid) {
                 localStorage.setItem('huayi_course_cid', cid);
-                localStorage.setItem('huayi_course_home', location.origin + location.pathname + '?cid=' + cid);
+                // 🌐 v1.6：szyxjxjy.cn 的列表页 URL 还带 ol 参数，保存完整地址方便结束页兜底返回
+                // 🔥 v1.6 fix：只在列表页(casePage.html)保存，避免播放页(ccPlay.html)覆盖正确的列表页地址
+                if (SITE.isSzyx) {
+                    if (SITE.isListPage()) {
+                        const ol = new URLSearchParams(location.search).get('ol') || '1';
+                        localStorage.setItem('huayi_course_home', `${location.origin}${location.pathname}?cid=${cid}&ol=${ol}`);
+                    }
+                } else {
+                    localStorage.setItem('huayi_course_home', location.origin + location.pathname + '?cid=' + cid);
+                }
             }
         } catch (e) {}
 
@@ -686,6 +792,25 @@
                 url: (url || '').trim()
             });
         };
+
+        // 🌐 v1.6 结构0（szyxjxjy.cn 列表页 casePage.html）：
+        //   <dl class="lisInside-case" onclick="goplay('COURSEWARE_ID','COURSE_SOURCE','VIDEOTYPE','SOURCE_ID')">
+        //     <dd><h2>COURSEWARE_NAME</h2>...</dd>
+        //     <dd><span>STUDY_STATE_NAME</span></dd>  <!-- 已完成/学习中/未学习 -->
+        //   </dl>
+        // 直接用 cwid+cid+ol 构建 ccPlay.html 链接，不依赖 goplay 的付费校验流程
+        document.querySelectorAll('dl.lisInside-case').forEach(item => {
+            const onclick = item.getAttribute('onclick') || '';
+            // goplay('COURSEWARE_ID', ...) 第一个引号内的参数即 cwid
+            const cwid = (onclick.match(/goplay\(\s*['"]([^'"]+)['"]/) || [])[1];
+            if (!cwid) return;
+            const title = item.querySelector('h2')?.textContent;
+            // study_state_name 在最后一个 dd > span
+            const dds = item.querySelectorAll('dd');
+            const lastDd = dds[dds.length - 1];
+            const status = (lastDd && lastDd.querySelector('span')?.textContent) || '未知';
+            pushCourse(title, status, cwid, '');
+        });
 
         // 结构1：课程首页 course.aspx 的 .course[data-href]（data-href 含 ../course_ware/... 完整相对路径）
         document.querySelectorAll('.course[data-href]').forEach(item => {
@@ -724,8 +849,68 @@
         }
     }
 
+    // 🌐 v1.6：szyxjxjy.cn 视频状态检测
+    // 页面 course_ware_finish() 成功后：$("#exam").removeClass("notClick") + 设置 href
+    // 完成前：<a id="exam" class="notClick" href="javascript:void(0)">进入考试</a>
+    // 完成后：<a id="exam" href="/pages/courseware/exam.html?...">进入考试</a>
+    function checkVideoStatusSzyx() {
+        try {
+            const video = document.querySelector('video');
+            const exam = document.getElementById('exam');
+            // 检测完成：#exam 存在、无 notClick 类、href 不是 javascript:void(0)
+            const isExamReady = !!(exam &&
+                exam.className.indexOf('notClick') === -1 &&
+                exam.getAttribute('href') &&
+                !/javascript:void\(0\)/i.test(exam.getAttribute('href') || ''));
+
+            // 视频自然结束且页面已标记完成 → 立即跳转
+            if (isExamReady) {
+                console.log('✅ 深圳卫健平台：课件已完成（#exam 已启用），准备跳转下一课');
+                setPanelStatus('completed');
+                clearInterval(clock);
+                clearInterval(timeCheckInterval);
+                clearFirstPlay(new URLSearchParams(location.search).get('cwid'));
+                // 页面可能在异步登记 feedback，留 2 秒缓冲再跳转
+                setTimeout(() => proceedToNext(), 2000);
+                return;
+            }
+
+            // 正常速度播放且视频已结束：页面正在异步提交 course_ware_finish，
+            // 不要立即跳转，等 #exam 启用（最多等 15 秒，兜底防止卡死）
+            if (currentSpeed === 1.0 && video && video.ended) {
+                console.log('📺 视频自然结束，等待页面 course_ware_finish() 异步登记完成…');
+                setPanelStatus('completed');
+                clearInterval(clock);
+                let wait = 0;
+                const waitTimer = setInterval(() => {
+                    const ex = document.getElementById('exam');
+                    const ready = !!(ex &&
+                        ex.className.indexOf('notClick') === -1 &&
+                        ex.getAttribute('href') &&
+                        !/javascript:void\(0\)/i.test(ex.getAttribute('href') || ''));
+                    if (ready || wait > 15) {
+                        clearInterval(waitTimer);
+                        clearFirstPlay(new URLSearchParams(location.search).get('cwid'));
+                        proceedToNext();
+                    }
+                    wait++;
+                }, 1000);
+                return;
+            }
+
+            // 仍未完成：标记播放中
+            setPanelStatus('playing');
+        } catch (e) {
+            console.log('szyxjxjy 状态检测错误:', e);
+        }
+    }
+
     function checkVideoStatus() {
         try {
+            if (SITE.isSzyx) {
+                return checkVideoStatusSzyx();
+            }
+
             let state = null;
             const stateEl = document.querySelector("i[id='top_play']");
 
@@ -809,6 +994,12 @@
             } catch (e) {}
         }
 
+        // 🌐 v1.6：szyxjxjy.cn 的课程项 url 为空（saveCourseList 未保存相对链接），
+        // 用 SITE.buildPlayUrl 直接拼出 ccPlay.html?cwid=X&ol=Y&cid=Z
+        if (SITE.isSzyx) {
+            return SITE.buildPlayUrl(entry ? entry.cwid : '', player);
+        }
+
         const base = localStorage.getItem('huayi_course_base') || (location.origin + '/course_ware/');
         return `${base}${fileName}?cwid=${entry ? entry.cwid : ''}`;
     }
@@ -875,7 +1066,9 @@
     }
 
     function blockPopups() {
+        // 🌐 v1.6：szyxjxjy.cn 的播放器是 cc_js_Player（无 window.player），跳过该拦截避免空转死循环
         (async function blockSendQuestion() {
+            if (SITE.isSzyx) return;
             while (!window.player?.sendQuestion) await new Promise(r => setTimeout(r, 20));
             window.player.sendQuestion = () => {};
         })();
@@ -1818,7 +2011,7 @@
         const defaultFirstPlayValue = savedDefault ? formatDateTimeLocal(savedDefault) : '';
 
         panel.innerHTML = `
-            <div style="font-weight: bold; margin-bottom: 8px;">🛡️ 华医网视频播放脚本 Pro</div>
+            <div style="font-weight: bold; margin-bottom: 8px;">🛡️ 华医网视频播放脚本 Pro${SITE.isSzyx ? ' ·深圳卫健' : ''}</div>
             <div style="margin-bottom: 4px;">状态: ${statusMap[status]}</div>
             <div style="margin-bottom: 4px; font-size: 10px; opacity: 0.9;">播放模式: ${speedModeText}</div>
             ${finishStateText ? `<div id="huayiFinishState" style="margin-bottom: 4px; font-size: 10px; opacity: 0.9;">分天策略: ${finishStateText}</div>` : ''}
