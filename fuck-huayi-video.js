@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      1.7
+// @version      1.9
 // @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅支持 91huayi.com 与 cme.szyxjxjy.cn
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
@@ -1056,9 +1056,25 @@
             const url = resolveCoursewareUrl(nextCourse, player);
             console.log(`→ 使用${player === 'polyv' ? 'Polyv' : 'CC'}播放器跳转: ${url}`);
 
-            setTimeout(() => {
-                location.href = url;
-            }, 1000);
+            // 🛡️ v1.8：深圳站跳转前先显式释放当前播放会话 + 多等 1 秒，
+            // 防止旧会话残留（release 请求 502/被导航中断）触发「多课件同时播放」并发误判
+            if (SITE.isSzyx) {
+                try {
+                    if (typeof window.releasePlaySession === 'function') {
+                        try { window.releasePlaySession(true); } catch (e) {}
+                        console.log('🔒 已主动释放当前播放会话');
+                    } else {
+                        console.log('🔒 页面无 releasePlaySession，依赖 beforeunload 释放');
+                    }
+                } catch (e) {}
+                setTimeout(() => {
+                    location.href = url;
+                }, 2000);
+            } else {
+                setTimeout(() => {
+                    location.href = url;
+                }, 1000);
+            }
         } else {
             console.log('❌ 无下一课程,刷新页面');
             setTimeout(() => location.reload(), 2000);
@@ -1072,6 +1088,51 @@
             while (!window.player?.sendQuestion) await new Promise(r => setTimeout(r, 20));
             window.player.sendQuestion = () => {};
         })();
+
+        // 🛡️ v1.8：深圳站「多课件同时播放」并发误判弹窗自动处理
+        // 原因：跳转瞬间旧会话 releasePlaySession 请求失败（服务器 502）残留，
+        //       新课件注册后服务器判定两个会话并存 → layui 弹窗终止播放。
+        // 处理：自动点「关闭」并刷新重连重新登记会话；5 分钟内最多自动刷新 2 次防循环。
+        if (SITE.isSzyx) {
+            setInterval(() => {
+                try {
+                    document.querySelectorAll('.layui-layer').forEach(layer => {
+                        if (!layer.textContent || layer.textContent.indexOf('同时打开多个课件') === -1) return;
+                        const btn = layer.querySelector('.layui-layer-btn0');
+                        if (btn) { btn.click(); console.log('🛡️ 检测到并发误判弹窗，已自动关闭'); }
+                        const KEY = 'huayi_szyx_concurrent_reload';
+                        const now = Date.now();
+                        const stamps = safeParseJSON(localStorage.getItem(KEY), []).filter(t => now - t < 5 * 60 * 1000);
+                        if (stamps.length < 2) {
+                            stamps.push(now);
+                            localStorage.setItem(KEY, JSON.stringify(stamps));
+                            console.log('🔄 3秒后刷新页面重新登记播放会话…');
+                            setTimeout(() => location.reload(), 3000);
+                        } else {
+                            console.log('⚠️ 5分钟内已自动刷新2次，弹窗留给用户手动处理');
+                        }
+                    });
+                } catch (e) {}
+            }, 2000);
+
+            // 🛡️ v1.9：CC 播放器加载失败自愈（CDN 抽风/坏缓存导致 createCCH5Player 未定义时自动限频刷新）
+            // 播放页 15 秒后仍无 <video> 且无 cc_js_Player → 自动刷新重试，5 分钟内最多 2 次防循环
+            setTimeout(() => {
+                setInterval(() => {
+                    try {
+                        if (document.querySelector('video') || typeof cc_js_Player !== 'undefined') return;
+                        const KEY = 'huayi_szyx_player_reload';
+                        const now = Date.now();
+                        const stamps = safeParseJSON(localStorage.getItem(KEY), []).filter(t => now - t < 5 * 60 * 1000);
+                        if (stamps.length >= 2) return;
+                        stamps.push(now);
+                        localStorage.setItem(KEY, JSON.stringify(stamps));
+                        console.log('🔄 播放器15秒未加载，自动刷新页面重试…');
+                        location.reload();
+                    } catch (e) {}
+                }, 15000);
+            }, 15000);
+        }
 
         if (typeof isInteraction !== 'undefined') isInteraction = 'off';
 

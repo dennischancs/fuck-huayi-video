@@ -3,6 +3,10 @@
 
 ![example](./assets/example.webp)
 
+2026/10/09 v1.9 新增深圳站 CC 播放器加载失败自愈：当播放页 15 秒后仍无 `<video>` 元素且 `cc_js_Player` 未定义（bokecc CDN 抽风/坏缓存导致 `createCCH5Player` 未加载）时，自动限频刷新页面重试，复用 5 分钟内最多 2 次的防循环机制（`huayi_szyx_player_reload`），让无人值守场景在 CDN 间歇性故障下也能自愈恢复；版本号升至 1.9；
+
+2026/10/09 v1.8 修复深圳卫健继教平台「同时打开多个课件」并发误判弹窗导致的播放中断：根因是跳转瞬间旧会话 `releasePlaySession` 同步 XHR 请求失败（服务器 502）导致会话残留，新课件注册后服务器判定两个会话并存触发 layui 弹窗终止播放，与倍速/点击频率无关；新增三层容错：① `proceedToNext` 跳转前主动调用 `window.releasePlaySession(true)` 释放当前会话并等待 2 秒再跳转（给服务器留登记窗口）；② `blockPopups` 新增 2 秒轮询自动检测含「同时打开多个课件」文本的 `.layui-layer` 弹窗，自动点击「关闭」按钮并刷新页面重新登记播放会话；③ 刷新限频（5 分钟内最多 2 次自动刷新，超出则留给用户手动处理）防止死循环；版本号升至 1.8；
+
 2026/10/08 v1.7 修复深圳卫健继教平台两处关键 bug：① casePage.html 列表页的课件条目由页面 JS 动态渲染（9 个 dl.lisInside-case），DOMContentLoaded 时 saveCourseList() 解析到 0 条直接跳过，改为延迟 500ms + 最多 5 次重试确保列表保存；② huayi_course_home 在 ccPlay 播放页被覆盖为 ccPlay URL，导致结束页兜底返回地址错误，改为仅在列表页（casePage.html）保存该字段；版本号升至 1.7，@match 已包含 *.szyxjxjy.cn/*，已通过浏览器端到端验证（ScriptCat 安装 + 面板创建 + CC 播放器检测 + 课程列表解析 + #exam 状态轮询均正常）；
 
 2026/10/08 v1.6 新增深圳卫健继教平台（cme.szyxjxjy.cn）支持：同款 bokecc.com CC 播放器（h5player-3.6.2.js），但页面结构与华医网不同——播放页 `/pages/courseware/ccPlay.html?cwid=X&ol=Y&cid=Z`、列表页 `/pages/casePage.html?cid=X&ol=Y`、完成指示改为 `#exam` 按钮去掉 `notClick` 类（页面 `course_ware_finish()` 成功后启用）；新增 `SITE` 站点识别配置统一抽象两站差异：`@match` 增加 `*.szyxjxjy.cn/*`、`getCourseCid` 优先读 URL `cid` 参数、`saveCourseList` 解析 `dl.lisInside-case[onclick=goplay(...)]` 课程条目、`resolveCoursewareUrl` 用 `SITE.buildPlayUrl` 直拼 ccPlay.html、`checkVideoStatusSzyx` 检测 `#exam` 启用后自动续播下一课（视频自然结束时等待页面异步 `course_ware_finish()` 登记完成再跳转）、`smartPlayerSwitch`/`blockSendQuestion` 在深圳站跳过华医专属逻辑避免空转；深圳站考试页 `exam.html` 与课件评价页 `coursewareEvaluation.html` 仅标记状态不干预（用户手动答题）；浮窗标题带 `·深圳卫健` 后缀区分当前站点；分天策略/倍速/弹题作答/签到弹窗等通用模块两站共用；
