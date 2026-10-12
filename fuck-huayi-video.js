@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      2.16
+// @version      2.17
 // @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅拟人模式模拟真人观看习惯（活动时段/每日上限）✅分天策略建议重开时间✅实验功能（一键跳到95%快速标记/直接编辑本地数据）✅支持 91huayi.com 与 cme.szyxjxjy.cn
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
@@ -1507,13 +1507,14 @@
                         if (apiPick && wrongOpts.indexOf(szyxNormText(szyxOptText(apiPick))) === -1) { pick = apiPick; fromApi++; }
                     }
                 }
-                // 🔥 v2.12 优先级 3：排除法——选第一个"文本未被判错"的选项
+                // 🔥 v2.17 优先级 3：排除法（随机化）——从"文本未被判错"的候选中随机挑一个。
+                // 首轮答题无任何记忆也走这里（全部选项都是候选），因此首次作答同样是随机起选，
+                // 消除 A→B→C→D 固定递推的机器特征；期望收敛轮数与顺序遍历相同（答案位置均匀分布）。
                 if (!pick) {
-                    for (let inp of inputs) {
-                        if (wrongOpts.indexOf(szyxNormText(szyxOptText(inp))) === -1) { pick = inp; break; }
-                    }
-                    if (!pick) { pick = inputs[0]; } // 全部判错（理论上不该发生）
-                    else fromElim++;
+                    const candidates = Array.from(inputs).filter(
+                        inp => wrongOpts.indexOf(szyxNormText(szyxOptText(inp))) === -1);
+                    if (candidates.length) { pick = candidates[Math.floor(Math.random() * candidates.length)]; fromElim++; }
+                    else { pick = inputs[0]; } // 全部判错（理论上不该发生）
                 }
                 pick.checked = true;
                 pick.click();
