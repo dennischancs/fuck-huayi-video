@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      2.13
+// @version      2.15
 // @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅拟人模式模拟真人观看习惯（活动时段/每日上限）✅分天策略建议重开时间✅实验功能（一键跳到95%快速标记/直接编辑本地数据）✅支持 91huayi.com 与 cme.szyxjxjy.cn
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
@@ -627,6 +627,8 @@
     }
 
     function init() {
+        // 🔥 v2.14：启动时打印实际运行的脚本版本，方便核对 Tampermonkey 是否已更新到最新版
+        try { console.log('🚀 [脚本] 已加载 v' + GM_info.script.version); } catch (e) {}
         // 🔥 新增：中途弹题自动作答（所有页面/iframe 都启用）
         setupAutoAnswer();
 
@@ -1315,6 +1317,11 @@
         map[qid] = optId;
         localStorage.setItem(SZYX_CORRECT_KEY, JSON.stringify(map));
     }
+    // 🔥 v2.15：作废脏锁（被锁选项已被判错时调用）
+    function deleteSzyxCorrect(qid) {
+        const map = getSzyxCorrectMap();
+        if (qid in map) { delete map[qid]; localStorage.setItem(SZYX_CORRECT_KEY, JSON.stringify(map)); }
+    }
     function addSzyxWrong(qid, optId) {
         if (!qid || !optId) return;
         const map = getSzyxWrongMap();
@@ -1328,6 +1335,16 @@
         const label = inp.closest('label') || inp.parentElement;
         let t = label ? (label.textContent || '') : '';
         return t.replace(/^\s*[A-Za-z]\s*[、.．,，:：]?\s*/, '').replace(/\s+/g, ' ').trim();
+    }
+    // 🔥 v2.14：归一化题干/选项文本——去掉序号前缀和**全部空白字符**。
+    // 实测：服务器题干渲染为"常规病理 HE 染色切片"（中英文间带空格），结果页错题列表却是不带空格的
+    // "常规病理HE染色切片"，按整串匹配会失败导致错题记不上（v2.11 诊断日志已暴露此问题）。
+    function szyxNormText(t) {
+        return String(t || '')
+            .replace(/^\s*\d+\s*[、.．,，]\s*/, '')  // 题目序号 "1、"
+            .replace(/^\s*[A-Za-z]\s*[、.．,，:：]?\s*/, '') // 选项字母 "A、"
+            .replace(/\s+/g, '')                       // 全部空白（含中英文间空格差异）
+            .trim();
     }
     function szyxRetryKey(cwid) { return 'huayi_szyx_retry_' + cwid; }
 
@@ -1420,13 +1437,23 @@
                 const inputs = div.querySelectorAll('input[type="radio"]');
                 if (!inputs.length) return;
                 // 🔥 v2.13：选项乱序 + ID 可能变化 → 记忆全部改为按"选项文本"匹配
-                const wrongOpts = (wrongMap[qidVal] || []).map(t => String(t).trim()); // 该题已判错的选项文本
-                const pickByText = txt => Array.from(inputs).find(i => szyxOptText(i) === txt) || null;
+                const wrongOpts = (wrongMap[qidVal] || []).map(t => szyxNormText(t)); // 该题已判错的选项文本（归一化）
+                const pickByText = txt => Array.from(inputs).find(i => szyxNormText(szyxOptText(i)) === szyxNormText(txt)) || null;
                 let pick = null;
                 // 🔥 v2.12 优先级 1：已确认正确（历史某轮未判错）→ 永久锁定，不再试探
+                // 🔥 v2.15 锁-错冲突自愈：若被锁的选项文本同时出现在错题库中，说明该锁是
+                // v2.13 空格匹配 bug 时期误锁的脏数据（判错题没匹配上→被当成"对的题"锁了错误答案），
+                // 此锁不可信 → 立即作废删除，回落排除法重新试探。
                 if (correctMap[qidVal]) {
-                    pick = pickByText(String(correctMap[qidVal]).trim());
-                    if (pick) fromLocked++;
+                    const lockText = szyxNormText(correctMap[qidVal]);
+                    if (wrongOpts.indexOf(lockText) !== -1) {
+                        console.warn('🧹 [考试] 检测到脏锁（被锁选项已判错）→ 作废 qid=' + qidVal + ' 锁="' + correctMap[qidVal] + '"，回落排除法');
+                        deleteSzyxCorrect(qidVal);
+                        delete correctMap[qidVal];
+                    } else {
+                        pick = pickByText(correctMap[qidVal]);
+                        if (pick) fromLocked++;
+                    }
                 }
                 // 🔥 v2.12 优先级 2：服务器原始响应的答案字段——必须通过冲突校验：
                 // 若该选项（按文本）已被判错过，说明字段不可信，弃用，防止反复选同一错项
@@ -1434,13 +1461,13 @@
                     const apiOptId = rawBody ? findSzyxCorrectOptId(rawBody, qidVal) : null;
                     if (apiOptId) {
                         const apiPick = Array.from(inputs).find(i => i.value === apiOptId) || null;
-                        if (apiPick && wrongOpts.indexOf(szyxOptText(apiPick)) === -1) { pick = apiPick; fromApi++; }
+                        if (apiPick && wrongOpts.indexOf(szyxNormText(szyxOptText(apiPick))) === -1) { pick = apiPick; fromApi++; }
                     }
                 }
                 // 🔥 v2.12 优先级 3：排除法——选第一个"文本未被判错"的选项
                 if (!pick) {
                     for (let inp of inputs) {
-                        if (wrongOpts.indexOf(szyxOptText(inp)) === -1) { pick = inp; break; }
+                        if (wrongOpts.indexOf(szyxNormText(szyxOptText(inp))) === -1) { pick = inp; break; }
                     }
                     if (!pick) { pick = inputs[0]; } // 全部判错（理论上不该发生）
                     else fromElim++;
@@ -1449,8 +1476,9 @@
                 pick.click();
                 chosen[qidVal] = pick.value;
                 // 🔥 v2.9：结果页 szErrrQuestion 存的是题目文本（非题目ID），按题干文本建立映射
-                // （题干带 "1、" 序号前缀，错题列表不带，两边都归一化后再匹配）
-                const qText = (qid.textContent || '').replace(/^\s*\d+\s*[、.．,，]\s*/, '').trim();
+                // （v2.14：两边都用 szyxNormText 归一化——去序号前缀 + 去全部空白，
+                //  免疫"常规病理 HE 染色"vs"常规病理HE染色"这类空格差异）
+                const qText = szyxNormText(qid.textContent);
                 byName[qText] = { qid: qidVal, opt: pick.value, optText: szyxOptText(pick) };
             });
             // 复查：所有题都已选中
@@ -1521,8 +1549,8 @@
         wrongList.forEach(w => {
             let qid = null, optText = null;
             if (typeof w === 'string') {
-                // 题干文本（去掉序号前缀后匹配）
-                const text = w.replace(/^\s*\d+\s*[、.．,，]\s*/, '').trim();
+                // 🔥 v2.14：题干文本归一化（去序号 + 去全部空白）后匹配，免疫空格差异
+                const text = szyxNormText(w);
                 if (byName[text]) { qid = byName[text].qid; optText = byName[text].optText || byName[text].opt; }
                 if (!qid && byId[w]) { qid = w; optText = (byId[w] && byId[w].optText) || byId[w]; } // 兼容：元素本身是题目ID
             } else if (w && typeof w === 'object') {
@@ -1553,6 +1581,9 @@
             const optText = info.optText || info.opt;
             if (!optText) return;
             if (wrongQids[info.qid]) return; // 判错的走 addSzyxWrong
+            // 🔥 v2.15 双保险：锁定的选项若已在错题库中（历史脏数据），拒绝写入锁
+            const wrongArr = getSzyxWrongMap()[info.qid] || [];
+            if (wrongArr.some(t => szyxNormText(t) === szyxNormText(optText))) return;
             // 🔥 v2.13：锁定也按选项文本
             setSzyxCorrect(info.qid, String(optText).trim());
             locked++;
