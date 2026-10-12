@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      2.17
+// @version      2.18
 // @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅拟人模式模拟真人观看习惯（活动时段/每日上限）✅分天策略建议重开时间✅实验功能（一键跳到95%快速标记/直接编辑本地数据）✅支持 91huayi.com 与 cme.szyxjxjy.cn
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
@@ -220,6 +220,11 @@
     let stallAt = 0; // 🔥 停滞检测：上次位置变化时间
     let isExpanded = false;
     let currentSpeed = realPlaybackRate;
+    // 🔥 v2.18 深圳站"非首播直通尾段"模式：非首次播放 + 时间差已达标 + 拟人允许时，
+    // 直接跳到最后10秒并以 1.0x 播完（无视用户倍速设置），播完走考试模块
+    let szyxTailMode = false;      // 已进入尾段直通模式
+    let szyxIsReplay = false;      // 本次打开前就已有本课件首播记录（= 非首次播放）
+    let szyxTailSeekAt = 0;        // 尾段跳转防抖时间戳
     const urlTip = window.location.pathname.split('/').pop().split('?')[0];
 
     // 🔥 新增：安全的JSON解析函数
@@ -681,6 +686,8 @@
                 // /pages/courseware/ccPlay.html?cwid=X&ol=Y&cid=Z
                 setPanelStatus('playing');
                 saveCourseList();
+                // 🔥 v2.18：在 initVideo 的 recordFirstPlay() 之前判断是否已有首播记录
+                szyxIsReplay = !!getFirstPlayTime(new URLSearchParams(location.search).get('cwid'));
                 initVideo(2); // 该站只用 CC 播放器
                 setupExamWatcher(); // 🔥 v2.5：MutationObserver 监听 #exam 变蓝，绕过轮询竞争
             } else if (SITE.isPolyvPage()) {
@@ -904,6 +911,8 @@
         try {
             if (!video || !video.duration || isNaN(video.duration)) return false;
             if (!canCompleteFully(video.duration)) return false;
+            // 🔥 v2.18：深圳站尾段直通模式已接管（最后10秒固定 1.0x），跳过本函数的 99%/8x 逻辑
+            if (SITE.isSzyx && szyxTailMode) return true;
 
             // 🔥 关键：有弹题/投票/结果浮层时不拉进度条，等自动处理模块完成再拉。
             // 拉进度条越过题目/投票时间点会触发弹窗并回退/暂停进度，
@@ -960,6 +969,14 @@
     function applyPlaybackSpeed(type) {
         try {
             const video = document.querySelector('video');
+
+            // 🔥 v2.18：深圳站尾段直通模式——最后10秒固定 1.0x，不套用用户倍速
+            if (SITE.isSzyx && szyxTailMode) {
+                if (video) originalDescriptor.set.call(video, 1.0);
+                const cp2 = window.cc_js_Player;
+                if (cp2 && cp2.setPlaybackRate) cp2.setPlaybackRate(1.0);
+                return;
+            }
 
             // 🔥 v1.5：时间差已达标 → 跳到99%匀速跑完，不再套用倍速
             if (handleCompletionPass(video)) {
@@ -1131,6 +1148,30 @@
                 // 页面可能在异步登记 feedback，留 2 秒缓冲再进入考试
                 setTimeout(() => { location.href = examHref; }, 2000);
                 return;
+            }
+
+            // 🔥 v2.18：非首播直通尾段——非首次播放 + 时间差已达标（canCompleteFully 满足
+            // 服务器"首播时间+时长×1.1"与"课程总时长"双重考核）+ 拟人模式允许 →
+            // 直接跳到最后10秒，强制 1.0x 播完（无视用户当前倍速设置），播完自然走考试模块
+            if (!szyxTailMode && szyxIsReplay && video && video.duration && !isNaN(video.duration) && !video.ended) {
+                if (canCompleteFully(video.duration) && humanizeAllowsPlay()) {
+                    szyxTailMode = true;
+                    currentSpeed = 1.0; // 让 ended 检测（L1138 currentSpeed===1.0）与守卫都按 1.0x 处理
+                    clearInterval(timeCheckInterval); // 停掉倍速监控，避免其 waitRegisteredThenProceed 抢跳下一课
+                    console.log('⚡ [深圳] 非首播且时间差已达标：跳到最后10秒，强制1倍速播完（忽略用户倍速设置）');
+                    seekForward(video, Math.max(0, video.duration - 10));
+                    try {
+                        originalDescriptor.set.call(video, 1.0);
+                        const cp = window.cc_js_Player;
+                        if (cp && cp.setPlaybackRate) cp.setPlaybackRate(1.0);
+                    } catch (e) {}
+                }
+            }
+            // 尾段模式下：若位置被看门狗回退（距结尾>12秒），3秒防抖补跳
+            if (szyxTailMode && video && video.duration && !video.ended &&
+                video.currentTime < video.duration - 12 && Date.now() - szyxTailSeekAt > 3000) {
+                szyxTailSeekAt = Date.now();
+                seekForward(video, Math.max(0, video.duration - 10));
             }
 
             // 正常速度播放且视频已结束：页面正在异步提交 course_ware_finish，
