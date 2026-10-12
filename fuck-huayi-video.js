@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      2.19
+// @version      2.20
 // @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅拟人模式模拟真人观看习惯（活动时段/每日上限）✅分天策略建议重开时间✅实验功能（一键跳到95%快速标记/直接编辑本地数据）✅支持 91huayi.com 与 cme.szyxjxjy.cn
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
@@ -1769,11 +1769,14 @@
                     }
                 }
             });
-            console.log('📝 [课件评价] 已填写好评：单选 ' + radios + ' 题，评语 ' + texts + ' 条，1 秒后提交');
+            // 🔥 v2.20：提交间隔拟人化——填完随机等 10~20 秒再提交（真人看完评价题需要时间）
+            const submitDelay = Math.floor(10000 + Math.random() * 10000);
+            console.log('📝 [课件评价] 已填写好评：单选 ' + radios + ' 题，评语 ' + texts + ' 条，' +
+                Math.round(submitDelay / 1000) + ' 秒后提交');
             setTimeout(() => {
                 const btn = document.getElementById('submit');
                 if (btn && !btn.getAttribute('disabled')) btn.click();
-            }, 1000);
+            }, submitDelay);
 
             // 提交成功后 myLayer.Alert(res.message, callback) 弹确认框，点确定才会跳 exam.html
             const clickLayerBtn = setInterval(() => {
