@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      2.20
+// @version      2.21
 // @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅拟人模式模拟真人观看习惯（活动时段/每日上限）✅分天策略建议重开时间✅实验功能（一键跳到95%快速标记/直接编辑本地数据）✅支持 91huayi.com 与 cme.szyxjxjy.cn
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
@@ -1984,19 +1984,24 @@
                 } catch (e) {}
             }, 2000);
 
-            // 🛡️ v1.9：CC 播放器加载失败自愈（CDN 抽风/坏缓存导致 createCCH5Player 未定义时自动限频刷新）
-            // 播放页 15 秒后仍无 <video> 且无 cc_js_Player → 自动刷新重试，5 分钟内最多 2 次防循环
+            // 🛡️ v1.9→v2.21：CC 播放器加载失败自愈（限频刷新）
+            // v2.21 修复：旧条件"typeof cc_js_Player !== 'undefined' 即健康"有漏洞——
+            // 实测 checkPlay 502 后播放器**半初始化**（cc_js_Player 对象存在但内部 video 未创建，
+            // 调 getDuration 抛 "Cannot read properties of undefined (reading 'duration')"），
+            // 页面无 <video> 永久卡死，旧守卫被 cc_js_Player 的存在骗过、永不刷新。
+            // 新条件：30 秒后（15s 延迟 + 15s 间隔）仍无 video/audio 元素 → 判定加载失败自动刷新，
+            // 5 分钟内最多 2 次防循环（限频键 huayi_szyx_player_reload 不变）
             setTimeout(() => {
                 setInterval(() => {
                     try {
-                        if (document.querySelector('video') || typeof cc_js_Player !== 'undefined') return;
+                        if (document.querySelector('video, audio')) return; // 媒体已就绪才算健康
                         const KEY = 'huayi_szyx_player_reload';
                         const now = Date.now();
                         const stamps = safeParseJSON(localStorage.getItem(KEY), []).filter(t => now - t < 5 * 60 * 1000);
                         if (stamps.length >= 2) return;
                         stamps.push(now);
                         localStorage.setItem(KEY, JSON.stringify(stamps));
-                        console.log('🔄 播放器15秒未加载，自动刷新页面重试…');
+                        console.log('🔄 播放器未加载出视频（checkPlay 可能失败/播放器半初始化），自动刷新页面重试…');
                         location.reload();
                     } catch (e) {}
                 }, 15000);
