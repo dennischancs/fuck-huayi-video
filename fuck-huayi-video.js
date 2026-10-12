@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      2.21
+// @version      2.22
 // @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅拟人模式模拟真人观看习惯（活动时段/每日上限）✅分天策略建议重开时间✅实验功能（一键跳到95%快速标记/直接编辑本地数据）✅支持 91huayi.com 与 cme.szyxjxjy.cn
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
@@ -225,6 +225,9 @@
     let szyxTailMode = false;      // 已进入尾段直通模式
     let szyxIsReplay = false;      // 本次打开前就已有本课件首播记录（= 非首次播放）
     let szyxTailSeekAt = 0;        // 尾段跳转防抖时间戳
+    // 🔥 v2.22：服务器端记录的本课件首播时间 begin_time（ms）——来自 getCourseWareState
+    // 接口，比本地 huayi_first_play 更权威（本地记录可能因重装脚本/清缓存丢失）
+    let szyxServerFirstPlay = 0;
     const urlTip = window.location.pathname.split('/').pop().split('?')[0];
 
     // 🔥 新增：安全的JSON解析函数
@@ -323,6 +326,60 @@
                 delete map[cwid];
                 localStorage.setItem('huayi_first_play', JSON.stringify(map));
             }
+        } catch (e) {}
+    }
+
+    // 🔥 v2.22：从服务器查询本课件首播时间（begin_time）——异步，结果存 szyxServerFirstPlay
+    // 接口：GET /api/course/getCourseWareState?course_id=<cid>&organ_id=<oid>
+    // 鉴权：请求头 token = localStorage.access_token；organ_id 取自 sessionStorage.sz_nav
+    //（数组，元素 {level, organ_id}，按 URL ?ol=Y 匹配 level）
+    function fetchSzyxServerFirstPlay() {
+        try {
+            const params = new URLSearchParams(location.search);
+            const cwid = params.get('cwid');
+            const cid = params.get('cid');
+            const ol = params.get('ol');
+            if (!cwid || !cid) return;
+            let organId = '';
+            try {
+                const nav = safeParseJSON(sessionStorage.getItem('sz_nav'), null);
+                if (Array.isArray(nav)) {
+                    const hit = nav.find(n => String(n.level) === String(ol)) || nav[0];
+                    if (hit && hit.organ_id) organId = String(hit.organ_id);
+                }
+            } catch (e) {}
+            if (!organId) {
+                console.log('[深圳] sz_nav 无 organ_id，跳过服务器首播查询');
+                return;
+            }
+            const xhr = new XMLHttpRequest();
+            xhr.open('GET', '/api/course/getCourseWareState?course_id=' + encodeURIComponent(cid) +
+                '&organ_id=' + encodeURIComponent(organId), true);
+            xhr.setRequestHeader('token', localStorage.getItem('access_token') || '');
+            xhr.setRequestHeader('Content-Type', 'application/json;charset=UTF-8');
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState !== 4) return;
+                try {
+                    const resp = JSON.parse(xhr.responseText);
+                    const list = resp && resp.body && resp.body.setCourseWareDate;
+                    if (!Array.isArray(list)) return;
+                    const mine = list.find(w => String(w.course_ware_id) === String(cwid));
+                    if (mine && mine.begin_time) {
+                        // begin_time: "yyyy-MM-dd hh:mm:ss" → 斜杠格式按本地时区解析为 ms
+                        const t = mine.begin_time.replace(/-/g, '/');
+                        const ms = new Date(t).getTime();
+                        if (!isNaN(ms)) {
+                            szyxServerFirstPlay = ms;
+                            console.log('⚡ [深圳] 服务器首播时间: ' + mine.begin_time +
+                                '（' + Math.floor((Date.now() - ms) / 60000) + ' 分钟前，state=' +
+                                mine.study_state + '）');
+                        }
+                    }
+                } catch (e) {
+                    console.warn('[深圳] 解析 getCourseWareState 失败:', e);
+                }
+            };
+            xhr.send();
         } catch (e) {}
     }
 
@@ -688,6 +745,8 @@
                 saveCourseList();
                 // 🔥 v2.18：在 initVideo 的 recordFirstPlay() 之前判断是否已有首播记录
                 szyxIsReplay = !!getFirstPlayTime(new URLSearchParams(location.search).get('cwid'));
+                // 🔥 v2.22：异步查询服务器端首播时间（begin_time），供尾段直通作权威判断
+                fetchSzyxServerFirstPlay();
                 initVideo(2); // 该站只用 CC 播放器
                 setupExamWatcher(); // 🔥 v2.5：MutationObserver 监听 #exam 变蓝，绕过轮询竞争
             } else if (SITE.isPolyvPage()) {
@@ -1153,12 +1212,18 @@
             // 🔥 v2.18：非首播直通尾段——非首次播放 + 时间差已达标（canCompleteFully 满足
             // 服务器"首播时间+时长×1.1"与"课程总时长"双重考核）+ 拟人模式允许 →
             // 直接跳到最后10秒，强制 1.0x 播完（无视用户当前倍速设置），播完自然走考试模块
-            if (!szyxTailMode && szyxIsReplay && video && video.duration && !isNaN(video.duration) && !video.ended) {
-                if (canCompleteFully(video.duration) && humanizeAllowsPlay()) {
+            // 🔥 v2.22：新增服务器端权威判断——getCourseWareState 返回的 begin_time 距今
+            // ≥ 时长×1.1 即认定"服务器早已记录过首播、时间差达标"，跳过本地两级保守校验
+            if (!szyxTailMode && video && video.duration && !isNaN(video.duration) && !video.ended) {
+                const serverOk = szyxServerFirstPlay > 0 &&
+                    Date.now() - szyxServerFirstPlay >= video.duration * 1000 * TIME_MARGIN;
+                const localOk = szyxIsReplay && canCompleteFully(video.duration);
+                if ((serverOk || localOk) && humanizeAllowsPlay()) {
                     szyxTailMode = true;
                     currentSpeed = 1.0; // 让 ended 检测（L1138 currentSpeed===1.0）与守卫都按 1.0x 处理
                     clearInterval(timeCheckInterval); // 停掉倍速监控，避免其 waitRegisteredThenProceed 抢跳下一课
-                    console.log('⚡ [深圳] 非首播且时间差已达标：跳到最后10秒，强制1倍速播完（忽略用户倍速设置）');
+                    console.log('⚡ [深圳] 非首播且时间差已达标（' + (serverOk ? '服务器端' : '本地') +
+                        '判断）：跳到最后10秒，强制1倍速播完（忽略用户倍速设置）');
                     seekForward(video, Math.max(0, video.duration - 10));
                     try {
                         originalDescriptor.set.call(video, 1.0);
