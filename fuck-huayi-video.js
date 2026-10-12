@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      2.23
+// @version      2.24
 // @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅拟人模式模拟真人观看习惯（活动时段/每日上限）✅分天策略建议重开时间✅实验功能（一键跳到95%快速标记/直接编辑本地数据）✅支持 91huayi.com 与 cme.szyxjxjy.cn
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
@@ -233,6 +233,7 @@
     // 距本课程上一次完成登记不足 gap（随机5~8分钟）时，在结尾前暂停等待 + 暂缓跳转下一课
     let szyxPacingLoggedAt = 0;   // 节流日志防刷屏时间戳
     let szyxHoldActive = false;   // 当前正因节流在结尾前暂停
+    let szyxSkipping = false;     // 🔥 v2.24：正在跳过"已学习"课件（跳过不产生新学习记录，无需时段节流）
     const urlTip = window.location.pathname.split('/').pop().split('?')[0];
 
     // 🔥 新增：安全的JSON解析函数
@@ -394,6 +395,23 @@
                             console.log('⏳ [深圳] 已合并服务器端其他课件最后学习时刻: ' +
                                 new Date(maxOtherEnd).toLocaleString());
                         } catch (e) {}
+                    }
+                    // 🔥 v2.24：服务器端 study_state==2（"已学习"）代表该课件学习+考试已全部
+                    // 完成，无需再进入播放。立即跳过——走 proceedToNext 选择下一门未完成课件
+                    // （含拟人门控与 v2.23 单课件时段隔离节流），只有"未学习/学习中"才需要学
+                    if (mine && Number(mine.study_state) === 2) {
+                        console.log('⏭️ [深圳] 本课件服务器状态为"已学习"（学习+考试均已完成），跳过不播');
+                        // 本课件自身的 end_time 也计入"最近完成登记"，供下一课件时段隔离参考
+                        if (mine.end_time) {
+                            const curEnd = new Date(String(mine.end_time).replace(/-/g, '/')).getTime();
+                            if (!isNaN(curEnd) && curEnd > getSzyxLastFinishMs()) {
+                                try {
+                                    localStorage.setItem('huayi_szyx_last_finish_' + getSzyxCourseId(), String(curEnd));
+                                } catch (e) {}
+                            }
+                        }
+                        setTimeout(() => { szyxSkipping = true; proceedToNext(); }, 500);
+                        return;
                     }
                 } catch (e) {
                     console.warn('[深圳] 解析 getCourseWareState 失败:', e);
@@ -2026,7 +2044,7 @@
         // 🔥 v2.23：单课件时段隔离——距本课程上一次完成登记不足 gap 时暂缓跳转下一课，
         // 确保下一课件的 begin_time 与上一课件的 end_time 之间有真人般的间隔
         // （服务器按时间段记录每个课件的学习区间，真人一个时间段只会开始/结束 1 个视频）
-        if (SITE.isSzyx) {
+        if (SITE.isSzyx && !szyxSkipping) {
             const pacingWait = szyxPacingWaitMs();
             if (pacingWait > 0) {
                 if (Date.now() - szyxPacingLoggedAt > 30000) {
