@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      2.15
+// @version      2.16
 // @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅拟人模式模拟真人观看习惯（活动时段/每日上限）✅分天策略建议重开时间✅实验功能（一键跳到95%快速标记/直接编辑本地数据）✅支持 91huayi.com 与 cme.szyxjxjy.cn
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
@@ -619,6 +619,45 @@
         } catch (e) {}
     }
 
+    // ==================== 🔥 v2.16：404/错误页自愈（考试循环不断链） ====================
+    // 循环答题时平台偶发 502/404（"网站暂时关闭"等错误页），落到错误页会中断自动答题流程。
+    // 策略：进入考试相关页（exam/examresult/评价页）时把"回归入口"存入 sessionStorage；
+    // 一旦落到错误页，拟人随机等待 20~60 秒（与 v2.10 重考间隔一致，避免风控）后
+    // 自动导航回考试页恢复循环；无回归入口或超时 30 分钟则回课程首页重新开始。
+    function isSzyxErrorPage() {
+        try {
+            const t = (document.title || '') + ' ' + (document.body ? document.body.innerText : '');
+            if (/\b404\b|not found|网站暂时关闭|service unavailable|bad gateway|\b50[23]\b|无法访问/.test(t)) {
+                // 错误页正文极短；正常页面含导航/题目等大量内容，避免误判
+                return (document.body ? document.body.innerText.length : 0) < 600;
+            }
+        } catch (e) {}
+        return false;
+    }
+
+    function saveSzyxExamRecovery() {
+        try {
+            const params = new URLSearchParams(location.search);
+            const ol = params.get('ol') || '1';
+            const cname = encodeURIComponent(params.get('cname') || '');
+            const url = '/pages/courseware/exam.html?ol=' + ol + (cname ? '&cname=' + cname : '');
+            sessionStorage.setItem('huayi_szyx_recover', JSON.stringify({ url: url, ts: Date.now() }));
+        } catch (e) {}
+    }
+
+    function recoverSzyxErrorPage() {
+        let target = null;
+        try { target = JSON.parse(sessionStorage.getItem('huayi_szyx_recover') || 'null'); } catch (e) {}
+        const valid = target && target.url && (Date.now() - target.ts) < 30 * 60 * 1000;
+        const delaySec = Math.floor(20 + Math.random() * 40);
+        console.warn('🛑 [考试] 检测到 404/错误页，' + delaySec + ' 秒后自动恢复答题循环');
+        setPanelStatus('error');
+        setTimeout(() => {
+            if (valid) { location.href = target.url; }
+            else { location.href = '/pages/index.html'; }
+        }, delaySec * 1000);
+    }
+
     // 等待DOM加载后再初始化UI
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
@@ -636,6 +675,8 @@
 
         // 🌐 v1.6：深圳卫健继教平台（szyxjxjy.cn）页面路由
         if (SITE.isSzyx) {
+            // 🔥 v2.16：404/错误页自愈——拟人等待后自动回到考试页，循环不断链
+            if (isSzyxErrorPage()) { recoverSzyxErrorPage(); return; }
             if (SITE.isPlayPage()) {
                 // /pages/courseware/ccPlay.html?cwid=X&ol=Y&cid=Z
                 setPanelStatus('playing');
@@ -663,12 +704,14 @@
             } else if (SITE.isSzyx && /examresult\.html/i.test(location.pathname)) {
                 // 🔥 v2.7：考试结果页（examresult.html）——错题记忆 + 自动重考直至全对
                 setPanelStatus('exam');
+                saveSzyxExamRecovery(); // 🔥 v2.16：记录回归入口，供 404/错误页自愈使用
                 handleSzyxExamResult();
             } else if (SITE.isSzyxExamPage()) {
                 // /pages/courseware/exam.html（真实考试）或 coursewareEvaluation.html（课件评价）
                 // exam.html：v2.7 起模仿华医网错题记忆方式自动作答交卷，最终达成全对
                 // coursewareEvaluation.html 的 cid 参数即 course_ware_id，标记完成便于浮窗显示
                 setPanelStatus('exam');
+                saveSzyxExamRecovery(); // 🔥 v2.16：记录回归入口，供 404/错误页自愈使用
                 const params = new URLSearchParams(location.search);
                 const cwid = params.get('cwid') || params.get('cid');
                 if (cwid) markCourseCompleted(cwid);
@@ -1508,6 +1551,14 @@
                 } else if (btn) {
                     btn.click();
                 }
+                // 🔥 v2.16：交卷后守卫——若交卷请求被风控拦截（502/404 弹"网站暂时关闭"、
+                // 页面停在考试页不跳结果页），90 秒后刷新考试页重进，循环不断链
+                setTimeout(() => {
+                    if (/exam\.html/i.test(location.pathname)) {
+                        console.warn('🛑 [考试] 交卷后 90 秒仍未跳转结果页（疑似请求被拦截），刷新考试页恢复循环');
+                        location.reload();
+                    }
+                }, 90000);
             }, submitDelay);
         };
         start(0);
