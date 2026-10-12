@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      2.22
+// @version      2.23
 // @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅拟人模式模拟真人观看习惯（活动时段/每日上限）✅分天策略建议重开时间✅实验功能（一键跳到95%快速标记/直接编辑本地数据）✅支持 91huayi.com 与 cme.szyxjxjy.cn
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
@@ -228,6 +228,11 @@
     // 🔥 v2.22：服务器端记录的本课件首播时间 begin_time（ms）——来自 getCourseWareState
     // 接口，比本地 huayi_first_play 更权威（本地记录可能因重装脚本/清缓存丢失）
     let szyxServerFirstPlay = 0;
+    // 🔥 v2.23：单课件时段隔离——服务器为每个课件记录 [begin_time, end_time]，
+    // 真人同一时间段只能学习 1 个课件。以下变量用于"完成登记节流"：
+    // 距本课程上一次完成登记不足 gap（随机5~8分钟）时，在结尾前暂停等待 + 暂缓跳转下一课
+    let szyxPacingLoggedAt = 0;   // 节流日志防刷屏时间戳
+    let szyxHoldActive = false;   // 当前正因节流在结尾前暂停
     const urlTip = window.location.pathname.split('/').pop().split('?')[0];
 
     // 🔥 新增：安全的JSON解析函数
@@ -375,6 +380,21 @@
                                 mine.study_state + '）');
                         }
                     }
+                    // 🔥 v2.23：合并其他课件的 end_time（服务器端最后学习时刻）到
+                    // "最近完成登记"记录，兜底本地记录丢失/换设备的情况
+                    let maxOtherEnd = 0;
+                    list.forEach(w => {
+                        if (String(w.course_ware_id) === String(cwid) || !w.end_time) return;
+                        const e = new Date(String(w.end_time).replace(/-/g, '/')).getTime();
+                        if (!isNaN(e) && e > maxOtherEnd) maxOtherEnd = e;
+                    });
+                    if (maxOtherEnd > 0 && maxOtherEnd > getSzyxLastFinishMs()) {
+                        try {
+                            localStorage.setItem('huayi_szyx_last_finish_' + getSzyxCourseId(), String(maxOtherEnd));
+                            console.log('⏳ [深圳] 已合并服务器端其他课件最后学习时刻: ' +
+                                new Date(maxOtherEnd).toLocaleString());
+                        } catch (e) {}
+                    }
                 } catch (e) {
                     console.warn('[深圳] 解析 getCourseWareState 失败:', e);
                 }
@@ -382,6 +402,62 @@
             xhr.send();
         } catch (e) {}
     }
+
+    // 🔥 v2.23：单课件时段隔离——课程身份解析（考试/成绩页 URL 无 cid，按 cwid 反查）
+    function getSzyxCourseId() {
+        const cid = getCourseCid();
+        if (cid) return cid;
+        try {
+            const cwid = new URLSearchParams(location.search).get('cwid');
+            if (cwid) return findCidByCwid(cwid);
+        } catch (e) {}
+        return null;
+    }
+
+    // 🔥 v2.23：本课程最近一次"完成登记"时刻（ms）——本地记录 + 服务器端其他课件
+    // end_time 的较大者（fetchSzyxServerFirstPlay 会把服务器数据合并进来兜底）
+    function getSzyxLastFinishMs() {
+        try {
+            const cid = getSzyxCourseId();
+            if (!cid) return 0;
+            const v = parseInt(localStorage.getItem('huayi_szyx_last_finish_' + cid) || '0', 10);
+            return isNaN(v) ? 0 : v;
+        } catch (e) { return 0; }
+    }
+
+    function markSzyxWareFinished() {
+        try {
+            const cid = getSzyxCourseId();
+            if (!cid) return;
+            const now = Date.now();
+            if (now > getSzyxLastFinishMs()) {
+                localStorage.setItem('huayi_szyx_last_finish_' + cid, String(now));
+            }
+        } catch (e) {}
+    }
+
+    // 🔥 v2.23：每门课程固定一个随机间隔（5~8 分钟），避免逐次判断抖动
+    function szyxPacingGapMs() {
+        try {
+            const cid = getSzyxCourseId();
+            if (!cid) return 360000;
+            const k = 'huayi_szyx_gap_' + cid;
+            let g = parseInt(localStorage.getItem(k) || '0', 10);
+            if (!g || isNaN(g)) {
+                g = 300000 + Math.floor(Math.random() * 180000);
+                localStorage.setItem(k, String(g));
+            }
+            return g;
+        } catch (e) { return 360000; }
+    }
+
+    // 距离允许下一次完成登记还需等待的毫秒数（0 = 可通行）
+    function szyxPacingWaitMs() {
+        const last = getSzyxLastFinishMs();
+        if (!last) return 0;
+        return Math.max(0, last + szyxPacingGapMs() - Date.now());
+    }
+    function szyxPacingOk() { return szyxPacingWaitMs() <= 0; }
 
     // 🔥 v1.5：课件页内嵌的 var cid（课程唯一标识，课程级考核用）
     // 🌐 v1.6：szyxjxjy.cn 的 cid 直接在 URL 参数 ?cid=... 里（casePage/ccPlay 都是）
@@ -972,6 +1048,10 @@
             if (!canCompleteFully(video.duration)) return false;
             // 🔥 v2.18：深圳站尾段直通模式已接管（最后10秒固定 1.0x），跳过本函数的 99%/8x 逻辑
             if (SITE.isSzyx && szyxTailMode) return true;
+            // 🔥 v2.23：单课件时段隔离——深圳站距上一课件完成登记不足 gap 时，禁止
+            // 99%/8x 抢跑（否则视频会在结尾前高速冲线，绕过 checkVideoStatusSzyx
+            // 的结尾暂停节流，导致两个课件在同一时间段内先后完成）
+            if (SITE.isSzyx && !szyxPacingOk()) return false;
 
             // 🔥 关键：有弹题/投票/结果浮层时不拉进度条，等自动处理模块完成再拉。
             // 拉进度条越过题目/投票时间点会触发弹窗并回退/暂停进度，
@@ -1201,12 +1281,41 @@
                 const examHref = new URL(exam.getAttribute('href'), location.href).href;
                 console.log('🎓 深圳卫健平台：课件已完成（#exam 已启用），准备进入考试: ' + examHref);
                 setPanelStatus('exam');
+                markSzyxWareFinished(); // 🔥 v2.23：记录本课程本次完成登记时刻（供时段隔离节流）
                 clearInterval(clock);
                 clearInterval(timeCheckInterval);
                 clearFirstPlay(new URLSearchParams(location.search).get('cwid'));
                 // 页面可能在异步登记 feedback，留 2 秒缓冲再进入考试
                 setTimeout(() => { location.href = examHref; }, 2000);
                 return;
+            }
+
+            // 🔥 v2.23：单课件时段隔离——视频播到还剩15秒、且距本课程上一次完成登记
+            // 不足 gap 时，在结尾前暂停等待：防止两个课件在同一时间段内先后完成，
+            // 服务器端 [begin_time, end_time] 记录看起来像同一段时间看了多个视频
+            if (video && video.duration && !isNaN(video.duration) && !video.ended && !szyxTailMode &&
+                video.currentTime >= video.duration - 15 && !szyxPacingOk()) {
+                try { if (!video.paused) video.pause(); } catch (e) {}
+                szyxHoldActive = true;
+                const waitMs = szyxPacingWaitMs();
+                if (Date.now() - szyxPacingLoggedAt > 30000) {
+                    szyxPacingLoggedAt = Date.now();
+                    console.log('⏳ [深圳] 单课件时段隔离：距本课程上一次完成登记不足 ' +
+                        Math.round(szyxPacingGapMs() / 60000) + ' 分钟，结尾前暂停等待约 ' +
+                        Math.ceil(waitMs / 60000) + ' 分钟（真人一次只看一个视频）');
+                }
+                return;
+            }
+            // 节流等待结束 → 恢复播放
+            if (szyxHoldActive) {
+                szyxHoldActive = false;
+                try {
+                    if (video && !video.ended && video.paused) {
+                        const p = video.play();
+                        if (p && p.catch) p.catch(() => {});
+                    }
+                } catch (e) {}
+                console.log('▶️ [深圳] 时段隔离等待结束，恢复播放以完成本课件');
             }
 
             // 🔥 v2.18：非首播直通尾段——非首次播放 + 时间差已达标（canCompleteFully 满足
@@ -1218,7 +1327,9 @@
                 const serverOk = szyxServerFirstPlay > 0 &&
                     Date.now() - szyxServerFirstPlay >= video.duration * 1000 * TIME_MARGIN;
                 const localOk = szyxIsReplay && canCompleteFully(video.duration);
-                if ((serverOk || localOk) && humanizeAllowsPlay()) {
+                // 🔥 v2.23：尾段直通同样受"单课件时段隔离"节流——上一课件完成登记后
+                // 不足 gap 不得再完成下一个（否则两个课件会在同一时间段内先后完成）
+                if ((serverOk || localOk) && humanizeAllowsPlay() && szyxPacingOk()) {
                     szyxTailMode = true;
                     currentSpeed = 1.0; // 让 ended 检测（L1138 currentSpeed===1.0）与守卫都按 1.0x 处理
                     clearInterval(timeCheckInterval); // 停掉倍速监控，避免其 waitRegisteredThenProceed 抢跳下一课
@@ -1256,6 +1367,7 @@
                         clearInterval(waitTimer);
                         clearFirstPlay(new URLSearchParams(location.search).get('cwid'));
                         if (ready) {
+                            markSzyxWareFinished(); // 🔥 v2.23：记录本课程本次完成登记时刻
                             // 🔥 v2.5：ready 时进考试，不再 proceedToNext 跳下一课
                             const examHref = new URL(ex.getAttribute('href'), location.href).href;
                             console.log('🎓 视频结束且登记完成，进入考试: ' + examHref);
@@ -1877,6 +1989,7 @@
             console.log('🎓 [exam-watcher:' + via + '] 考试入口已启用，立即进入考试: ' + examUrl);
             clearInterval(clock);
             clearInterval(timeCheckInterval);
+            markSzyxWareFinished(); // 🔥 v2.23：记录本课程本次完成登记时刻（供时段隔离节流）
             setPanelStatus('exam');
             clearFirstPlay(new URLSearchParams(location.search).get('cwid'));
             // 留 1.5 秒缓冲（页面可能仍在提交 userFeedBackCoursewareOk），期间无其他路径能再触发跳转
@@ -1909,6 +2022,22 @@
             console.log('🌙 拟人模式：当前不在活动时段或今日额度已满，暂缓跳转下一课（每分钟自动重试）');
             setTimeout(() => proceedToNext(), 60000);
             return;
+        }
+        // 🔥 v2.23：单课件时段隔离——距本课程上一次完成登记不足 gap 时暂缓跳转下一课，
+        // 确保下一课件的 begin_time 与上一课件的 end_time 之间有真人般的间隔
+        // （服务器按时间段记录每个课件的学习区间，真人一个时间段只会开始/结束 1 个视频）
+        if (SITE.isSzyx) {
+            const pacingWait = szyxPacingWaitMs();
+            if (pacingWait > 0) {
+                if (Date.now() - szyxPacingLoggedAt > 30000) {
+                    szyxPacingLoggedAt = Date.now();
+                    console.log('⏳ [深圳] 单课件时段隔离：距上一课件完成登记不足 ' +
+                        Math.round(szyxPacingGapMs() / 60000) + ' 分钟，暂缓跳转下一课约 ' +
+                        Math.ceil(pacingWait / 60000) + ' 分钟（每30秒重试）');
+                }
+                setTimeout(() => proceedToNext(), 30000);
+                return;
+            }
         }
         // 确保当前视频进度被记录
         try {

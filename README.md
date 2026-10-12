@@ -3,6 +3,8 @@
 
 ![example](./assets/example.webp)
 
+2026/10/12 v2.23 深圳站**单课件时段隔离**（基于服务器课件学习记录模型）：服务器为每个课件记录 `[begin_time, end_time]` 学习区间，真人同一时间段只能学习 1 个课件——而脚本 8x/尾段直通会让多个课件在几分钟内先后完成登记，区间挤在同一时间段。新增课程级"完成登记节流"：①每次完成登记（#exam 变蓝）时记录时刻（`huayi_szyx_last_finish_<cid>`，并从 `getCourseWareState` 合并其他课件 end_time 兜底）；②每门课程固定一个随机 5~8 分钟间隔（`huayi_szyx_gap_<cid>`）；③距上次完成登记不足间隔时：视频在**还剩 15 秒处暂停等待**（恢复后播完触发登记）、**尾段直通暂不触发**、**99%/8x 抢跑禁用**（防止绕过结尾暂停）、**proceedToNext 暂缓跳下一课**（每 30 秒重试）——确保任一时间段内最多只有 1 个课件被完成登记，且下一课件的 begin_time 与上一课件 end_time 之间有真人般的间隔；考试/成绩页无 cid 时按 cwid 反查课程（`findCidByCwid`）；版本号升至 2.23；
+
 2026/10/12 v2.22 深圳站尾段直通新增**服务器端权威判断**（浏览器实测发现）：v2.18 仅靠本地 `huayi_first_play` 记录判断"非首播+时间差达标"，但服务器端早已登记过的播放（如 `getCourseWareState` 显示某课件 begin_time 为 4 天前）会被本地"今天才记录、elapsed 不足"的保守校验挡住。现播放页初始化时异步调用 `GET /api/course/getCourseWareState?course_id=<cid>&organ_id=<oid>`（token 请求头，organ_id 取自 `sessionStorage.sz_nav` 按 URL `ol` 匹配），按 cwid 匹配本课件 `begin_time`——距今 ≥ 时长×1.1 即直接触发尾段直通（跳过本地两级校验）；本地 `canCompleteFully` 路径保留为接口失败时的兜底；`humanizeAllowsPlay` 拟人门控不变；版本号升至 2.22；
 
 2026/10/12 v2.21 修复播放器加载失败自愈守卫失效（浏览器实测发现）：实测 `checkPlay` 接口 502 后 CC 播放器**半初始化**——`cc_js_Player` 对象存在但内部 video 未创建（调 `getDuration` 抛 `Cannot read properties of undefined (reading 'duration')`），页面无 `<video>` 永久卡死；旧 v1.9 守卫以"typeof cc_js_Player !== 'undefined' 即健康"做判断，被半初始化对象骗过永不触发刷新。改为 **30 秒后仍无 `video/audio` 元素即判定失败自动刷新**（5 分钟内最多 2 次防循环，限频键不变）；版本号升至 2.21；
