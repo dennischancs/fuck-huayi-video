@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      2.18
+// @version      2.19
 // @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅拟人模式模拟真人观看习惯（活动时段/每日上限）✅分天策略建议重开时间✅实验功能（一键跳到95%快速标记/直接编辑本地数据）✅支持 91huayi.com 与 cme.szyxjxjy.cn
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
@@ -1420,6 +1420,12 @@
         let t = label ? (label.textContent || '') : '';
         return t.replace(/^\s*[A-Za-z]\s*[、.．,，:：]?\s*/, '').replace(/\s+/g, ' ').trim();
     }
+    // 🔥 v2.19：取选项字母（label "A、xxx" → 'A'），供"答案均衡分布先验"使用；取不到返回 ''
+    function szyxOptLetter(inp) {
+        const label = inp.closest('label') || inp.parentElement;
+        const m = label ? String(label.textContent || '').trim().match(/^([A-Za-z])/) : null;
+        return m ? m[1].toUpperCase() : '';
+    }
     // 🔥 v2.14：归一化题干/选项文本——去掉序号前缀和**全部空白字符**。
     // 实测：服务器题干渲染为"常规病理 HE 染色切片"（中英文间带空格），结果页错题列表却是不带空格的
     // "常规病理HE染色切片"，按整串匹配会失败导致错题记不上（v2.11 诊断日志已暴露此问题）。
@@ -1514,6 +1520,12 @@
             const byName = {}; // 🔥 v2.9：题干文本 → {qid, opt, optText}（结果页错题列表是文本，靠它反查题目ID）
             const correctMap = getSzyxCorrectMap(); // 🔥 v2.12：已确认正确的答案（v2.13 起按选项文本），直接锁定
             let fromApi = 0, fromLocked = 0, fromElim = 0;
+            // 🔥 v2.19：答案均衡分布先验——出题人的标准卷面正确答案往往 A~E 各字母均衡（如 10 题各 2 道）。
+            // 本轮内已确定答案（锁定/API/排除法已选）的字母实时计数；排除法选候选时优先补"最欠配额"的字母，
+            // 同配额字母间随机平票。软偏好而非硬约束：错题排除永远优先，不影响任何既有优先级；
+            // 信息论上最坏轮数不变（每轮每题必然淘汰一个错项，与选哪个候选无关），只降低期望轮数。
+            // 注意：本站选项每次渲染随机打乱，字母均衡在打乱后只是弱先验，因此仅作排序偏好。
+            const letterCount = {};
             items.forEach(div => {
                 const qid = div.querySelector('p[data-qid]');
                 if (!qid) return;
@@ -1548,17 +1560,32 @@
                         if (apiPick && wrongOpts.indexOf(szyxNormText(szyxOptText(apiPick))) === -1) { pick = apiPick; fromApi++; }
                     }
                 }
-                // 🔥 v2.17 优先级 3：排除法（随机化）——从"文本未被判错"的候选中随机挑一个。
-                // 首轮答题无任何记忆也走这里（全部选项都是候选），因此首次作答同样是随机起选，
-                // 消除 A→B→C→D 固定递推的机器特征；期望收敛轮数与顺序遍历相同（答案位置均匀分布）。
+                // 🔥 v2.17/v2.19 优先级 3：排除法（随机化 + 均衡先验）——
+                // 候选 = "文本未被判错"的全部选项（首轮答题全选项都是候选，首次作答同样走这里）。
+                // v2.19 在随机基础上叠加"答案均衡分布先验"：优先补本轮出现次数最少的字母，
+                // 同配额字母间随机平票——既保留 v2.17 消除固定遍历的随机性，又利用出题人
+                // "A~E 均衡出答案"的统计规律降低期望收敛轮数；错题排除仍绝对优先。
                 if (!pick) {
                     const candidates = Array.from(inputs).filter(
                         inp => wrongOpts.indexOf(szyxNormText(szyxOptText(inp))) === -1);
-                    if (candidates.length) { pick = candidates[Math.floor(Math.random() * candidates.length)]; fromElim++; }
+                    if (candidates.length) {
+                        let bestN = Infinity;
+                        const tied = [];
+                        candidates.forEach(inp => {
+                            const n = letterCount[szyxOptLetter(inp)] || 0;
+                            if (n < bestN) { bestN = n; tied.length = 0; tied.push(inp); }
+                            else if (n === bestN) tied.push(inp);
+                        });
+                        pick = tied[Math.floor(Math.random() * tied.length)]; // 最欠配额字母（并列则随机）
+                        fromElim++;
+                    }
                     else { pick = inputs[0]; } // 全部判错（理论上不该发生）
                 }
                 pick.checked = true;
                 pick.click();
+                // 🔥 v2.19：本轮字母配额计数（锁定/API/排除法的最终选择都计入）
+                const pickLetter = szyxOptLetter(pick);
+                if (pickLetter) letterCount[pickLetter] = (letterCount[pickLetter] || 0) + 1;
                 chosen[qidVal] = pick.value;
                 // 🔥 v2.9：结果页 szErrrQuestion 存的是题目文本（非题目ID），按题干文本建立映射
                 // （v2.14：两边都用 szyxNormText 归一化——去序号前缀 + 去全部空白，
