@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      2.24
+// @version      2.25
 // @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅拟人模式模拟真人观看习惯（活动时段/每日上限）✅分天策略建议重开时间✅实验功能（一键跳到95%快速标记/直接编辑本地数据）✅支持 91huayi.com 与 cme.szyxjxjy.cn
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
@@ -379,6 +379,24 @@
                             console.log('⚡ [深圳] 服务器首播时间: ' + mine.begin_time +
                                 '（' + Math.floor((Date.now() - ms) / 60000) + ' 分钟前，state=' +
                                 mine.study_state + '）');
+                        }
+                    }
+                    // 🔥 v2.25：服务器会把"未答题"的课件整条记录重置为未学习
+                    //（begin_time 清空）。此时回退取课程内所有课件中最早的
+                    // begin_time（= 服务器端记录的该课程最先打开时间）作为
+                    // 尾段直通判断的依据
+                    if (!szyxServerFirstPlay) {
+                        let minBegin = 0;
+                        list.forEach(w => {
+                            if (!w.begin_time) return;
+                            const b = new Date(String(w.begin_time).replace(/-/g, '/')).getTime();
+                            if (!isNaN(b) && (minBegin === 0 || b < minBegin)) minBegin = b;
+                        });
+                        if (minBegin > 0) {
+                            szyxServerFirstPlay = minBegin;
+                            console.log('⚡ [深圳] 本课件服务器记录已重置（未学习），回退用课程最早打开时间: ' +
+                                new Date(minBegin).toLocaleString() +
+                                '（' + Math.floor((Date.now() - minBegin) / 60000) + ' 分钟前）');
                         }
                     }
                     // 🔥 v2.23：合并其他课件的 end_time（服务器端最后学习时刻）到
