@@ -3,7 +3,7 @@
 
 ![example](./assets/example.webp)
 
-2026/10/13 v2.25 深圳站尾段直通判断改用**服务器端课程最早打开时间**（用户实测发现）：服务器会把"未答题"的课件整条学习记录隔天重置为未学习（begin_time/end_time 清空、play_count=0），导致 v2.22 的"本课件 begin_time"判断失效、已看过的视频只能从头正常播放。现 `fetchSzyxServerFirstPlay` 中本课件 begin_time 为空（记录被重置）时，回退取 `setCourseWareDate[]` 全部课件中**最早**的 begin_time（= 服务器端记录的该课程最先打开时间，如课程内已学习课件保留的 10-08 20:44）写入 `szyxServerFirstPlay`，尾段直通据此触发；`recordFirstPlay` 仅在无记录时写入、不再覆盖本地最早首播时间；版本号升至 2.25；
+2026/10/13 v2.25 深圳站尾段直通判断改用**服务器端课程最早打开时间**（用户实测发现）：服务器会把"未答题"的课件整条学习记录隔天重置为未学习（begin_time/end_time 清空、play_count=0），导致 v2.22 的"本课件 begin_time"判断失效、已看过的视频只能从头正常播放。现 `fetchSzyxServerFirstPlay` 中本课件 begin_time 为空（记录被重置）时，回退取 `setCourseWareDate[]` 全部课件中**最早**的 begin_time（= 服务器端记录的该课程最先打开时间，如课程内已学习课件保留的 10-08 20:44）写入 `szyxServerFirstPlay`，尾段直通据此触发；`recordFirstPlay` 仅在无记录时写入、不再覆盖本地最早首播时间；版本号升至 2.25；**实测验证通过**（408045A0）：打开播放页约 20 秒即尾段直通→播完 10 秒→自动进考试；服务器重新登记时自身也把 begin_time 写回课程原始的 10-08 20:44，证明"取课程最早 begin_time 回退"与服务器行为完全一致；另确认：服务器对重置课件是**物理清空**整条记录（study_course_ware_id/begin_time/end_time 全 null），单课件的"最早打开时间"服务器不保留，课程内未被重置课件共同保留的最早 begin_time 是唯一数据源；
 
 2026/10/12 v2.24 深圳站**跳过"已学习"课件**（浏览器实测发现）：服务器端 `study_state==2`（已学习）代表该课件学习+考试已全部完成，无需再进入播放（实测脚本曾把已学习课件 DA13066E 当新课件完整播放，浪费时段）。`fetchSzyxServerFirstPlay` 解析响应后若本课件 `study_state==2`：记录其 end_time 进"最近完成登记"后立即走 `proceedToNext` 跳到下一门未完成课件——只有"未学习/学习中"才进入学习；跳过链（连续多个已学习课件）不产生新学习记录，绕过 v2.23 单课件时段隔离节流（`szyxSkipping` 标志，拟人门控保留）；版本号升至 2.24；
 

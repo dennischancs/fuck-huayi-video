@@ -604,7 +604,7 @@
     let humanizePausedByUs = false;
 
     function getHumanizeCfg() {
-        const def = { enabled: true, start: 8, end: 22, capHours: 12 };
+        const def = { enabled: true, start: 8, end: 24, capHours: 12 };
         try {
             const raw = JSON.parse(localStorage.getItem(HUMANIZE_KEY) || 'null');
             if (raw && typeof raw === 'object') {
