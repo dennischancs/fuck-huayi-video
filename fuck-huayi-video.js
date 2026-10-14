@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      2.25
+// @version      2.26
 // @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅拟人模式模拟真人观看习惯（活动时段/每日上限）✅分天策略建议重开时间✅实验功能（一键跳到95%快速标记/直接编辑本地数据）✅支持 91huayi.com 与 cme.szyxjxjy.cn
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
@@ -2096,7 +2096,9 @@
         const isIncomplete = (status) => {
             if (!status) return true;
             const s = status.toLowerCase();
-            return !s.includes('已完成') && !s.includes('完成');
+            // 🔥 v2.26：深圳站完成态是"已学习"（不含"完成"字样），必须一并视为完成，
+            // 否则全对交卷后会把已学习课件当"下一课"反复打开 → 死循环
+            return !s.includes('已完成') && !s.includes('完成') && !s.includes('已学习');
         };
 
         // 🔥 v2.2：绝不能把"下一课"解析成当前课件自己——
@@ -2450,7 +2452,8 @@
                 const isIncomplete = (status) => {
                     if (!status) return true;
                     const s = status.toLowerCase();
-                    return !s.includes('已完成') && !s.includes('完成');
+                    // 🔥 v2.26：同步修复——"已学习"（深圳站完成态）视为完成
+                    return !s.includes('已完成') && !s.includes('完成') && !s.includes('已学习');
                 };
                 const hasNext = courses.some((c, i) => i !== currentIdx && isIncomplete(c.status));
 
