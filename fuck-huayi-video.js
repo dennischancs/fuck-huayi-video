@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      2.26
+// @version      2.27
 // @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅拟人模式模拟真人观看习惯（活动时段/每日上限）✅分天策略建议重开时间✅实验功能（一键跳到95%快速标记/直接编辑本地数据）✅支持 91huayi.com 与 cme.szyxjxjy.cn
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
@@ -1631,7 +1631,8 @@
     function szyxOptText(inp) {
         const label = inp.closest('label') || inp.parentElement;
         let t = label ? (label.textContent || '') : '';
-        return t.replace(/^\s*[A-Za-z]\s*[、.．,，:：]?\s*/, '').replace(/\s+/g, ' ').trim();
+        // 🔥 v2.27：标点必选（+非?），否则 "tNGS" 会被误剥首字母 t → "NGS"，与 "mNGS"→"NGS" 碰撞
+        return t.replace(/^\s*[A-Za-z]\s*[、.．,，:：]+\s*/, '').replace(/\s+/g, ' ').trim();
     }
     // 🔥 v2.19：取选项字母（label "A、xxx" → 'A'），供"答案均衡分布先验"使用；取不到返回 ''
     function szyxOptLetter(inp) {
@@ -1645,7 +1646,8 @@
     function szyxNormText(t) {
         return String(t || '')
             .replace(/^\s*\d+\s*[、.．,，]\s*/, '')  // 题目序号 "1、"
-            .replace(/^\s*[A-Za-z]\s*[、.．,，:：]?\s*/, '') // 选项字母 "A、"
+            // 🔥 v2.27：标点必选（+非?），否则 "tNGS"→"NGS" 与 "mNGS"→"NGS" 碰撞 → 排除法误删正确答案
+            .replace(/^\s*[A-Za-z]\s*[、.．,，:：]+\s*/, '') // 选项字母 "A、"
             .replace(/\s+/g, '')                       // 全部空白（含中英文间空格差异）
             .trim();
     }
