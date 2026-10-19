@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      2.27
+// @version      2.28
 // @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅拟人模式模拟真人观看习惯（活动时段/每日上限）✅分天策略建议重开时间✅实验功能（一键跳到95%快速标记/直接编辑本地数据）✅支持 91huayi.com 与 cme.szyxjxjy.cn
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
@@ -832,6 +832,88 @@
         }, delaySec * 1000);
     }
 
+    // 🔥 v2.28：exam.html 页面自愈——修复页面内联脚本 JSON.parse("") 抛 SyntaxError 导致 loadQuestion() 不注册的 bug
+    // 根因：exam.html 内联 <script> 在 document-start 时执行
+    //   let examParams = sessionStorage.getItem("szExamParams") || "";
+    //   let josnParams = JSON.parse(examParams);  // ← 当 szExamParams 缺失时 JSON.parse("") 抛 SyntaxError！
+    // 这导致后续的 $(function(){ loadQuestion(); }) 永远不执行，题目永远不加载。
+    // 油猴脚本 @run-at document-start 正好能在页面内联脚本之前运行，提前把参数设好就能避免崩溃。
+    function healSzyxExamSession() {
+        if (!SITE.isSzyx || !/\/exam\.html/i.test(location.pathname)) return;
+        try {
+            // 先备份当前 sessionStorage 到 localStorage（如果有）
+            const curNav = sessionStorage.getItem('sz_nav');
+            if (curNav) localStorage.setItem('huayi_szyx_nav_backup', curNav);
+            const curParams = sessionStorage.getItem('szExamParams');
+            if (curParams) localStorage.setItem('huayi_szyx_exam_params_backup', curParams);
+
+            // 检查是否需要恢复
+            const needExamParams = !sessionStorage.getItem('szExamParams');
+            const needNav = !sessionStorage.getItem('sz_nav');
+            if (!needExamParams && !needNav) {
+                console.log('🩹 [考试] sessionStorage 完整，无需自愈');
+                return;
+            }
+            console.warn('🩹 [考试] sessionStorage 缺失（examParams=' + !needExamParams + ', nav=' + !needNav + '），开始自愈...');
+
+            const params = new URLSearchParams(location.search);
+            const ol = params.get('ol') || '1';
+            const cname = decodeURIComponent(params.get('cname') || '');
+
+            // 1) 恢复 szExamParams
+            if (needExamParams) {
+                let examParamsStr = localStorage.getItem('huayi_szyx_exam_params_backup');
+                // 从 URL cname + 课程列表反查 cwid（首次进入时走这个）
+                if (!examParamsStr && cname) {
+                    try {
+                        const courseList = JSON.parse(localStorage.getItem('huayi_course_list') || '[]');
+                        const course = courseList.find(c => c.title === cname);
+                        const cwid = course ? course.cwid : '';
+                        if (cwid) {
+                            examParamsStr = JSON.stringify({
+                                course_ware_id: cwid,
+                                organ_level: ol,
+                                course_source: 1,
+                                course_id: params.get('cid') || localStorage.getItem('huayi_course_cid') || ''
+                            });
+                        }
+                    } catch (e) { console.warn('🩹 [考试] 课程列表解析失败:', e.message); }
+                }
+                if (examParamsStr) {
+                    sessionStorage.setItem('szExamParams', examParamsStr);
+                    console.log('🩹 [考试] 已恢复 szExamParams');
+                } else {
+                    console.warn('🩹 [考试] szExamParams 恢复失败（无备份且 cname 未匹配到课程）');
+                }
+            }
+
+            // 2) 恢复 sz_nav
+            if (needNav) {
+                let navStr = localStorage.getItem('huayi_szyx_nav_backup');
+                if (navStr) {
+                    sessionStorage.setItem('sz_nav', navStr);
+                    console.log('🩹 [考试] 已恢复 sz_nav（来自 localStorage 备份）');
+                } else {
+                    // 兜底：从页面自己的 public 接口拿（common.js 的 getOrganList），这里硬编码 level 1
+                    navStr = JSON.stringify([{
+                        organ_id: 'C46AC6DE-11F5-4F3B-8692-9C1500E6685B',
+                        organ_name: '继续教育',
+                        level: parseInt(ol, 10) || 1
+                    }]);
+                    sessionStorage.setItem('sz_nav', navStr);
+                    console.warn('🩹 [考试] sz_nav 无备份，使用硬编码兜底（继续教育 level=' + ol + '）');
+                }
+            }
+            console.log('🩹 [考试] sessionStorage 自愈完成 ✅');
+        } catch (e) {
+            console.error('🩹 [考试] 自愈异常:', e);
+        }
+    }
+
+    // 🔥 v2.28：考试页自愈需要在 init() 之前执行（@run-at document-start），
+    // 这样页面自己的内联 <script> 在解析到 JSON.parse(szExamParams) 时 sessionStorage 已经就绪了
+    healSzyxExamSession();
+
     // 等待DOM加载后再初始化UI
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
@@ -849,6 +931,14 @@
 
         // 🌐 v1.6：深圳卫健继教平台（szyxjxjy.cn）页面路由
         if (SITE.isSzyx) {
+            // 🔥 v2.28：把 sz_nav / szExamParams 备份到 localStorage（exam.html 自愈用）
+            try {
+                const nav = sessionStorage.getItem('sz_nav');
+                if (nav) localStorage.setItem('huayi_szyx_nav_backup', nav);
+                const p = sessionStorage.getItem('szExamParams');
+                if (p) localStorage.setItem('huayi_szyx_exam_params_backup', p);
+            } catch (e) {}
+
             // 🔥 v2.16：404/错误页自愈——拟人等待后自动回到考试页，循环不断链
             if (isSzyxErrorPage()) { recoverSzyxErrorPage(); return; }
             if (SITE.isPlayPage()) {

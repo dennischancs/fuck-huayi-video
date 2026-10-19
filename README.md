@@ -3,6 +3,8 @@
 
 ![example](./assets/example.webp)
 
+2026/10/19 v2.28 修复深圳站 exam.html **题目加载不出来**（浏览器诊断）：exam.html 内联 `<script>` 一上来就 `let josnParams = JSON.parse(sessionStorage.getItem("szExamParams") || "")`，当 sessionStorage 被浏览器进程清掉后（跨标签页切换/手动清 storage），`JSON.parse("")` 直接抛 SyntaxError → 后续所有代码（含 `$(function(){ loadQuestion(); })` 和 `function loadQuestion(){...}` 定义）全部中断，`.kaoshi_box` 永远空、题目永远不渲染（之前排查误以为是 API 没返回或脚本报错）。修复方案：脚本 `@run-at document-start` 正好能在页面内联脚本之前执行，新增 `healSzyxExamSession()` 自愈函数——检测到 exam.html 时若 `szExamParams` / `sz_nav` 缺失，立即从 localStorage 恢复（`szExamParams` 用 URL `cname` + `huayi_course_list` 反查 cwid，`sz_nav` 有 localStorage 备份则取备份、兜底用硬编码"继续教育 level=1"）；同时在 SITE.isSzyx 的 init 分支里把每次正常拿到的 sessionStorage 值反向备份到 localStorage，形成"正常页→备份→崩溃页→恢复"闭环；实测手动清空 sessionStorage 后刷新 exam.html，题目自动恢复加载 ✅；版本号升至 2.28；
+
 2026/10/13 v2.27 修复**一道题一直做错**的考试死循环（用户发现+浏览器诊断）：`szyxNormText`/`szyxOptText` 的字母前缀正则 `[、.．,，:：]?` 用了 `?`（标点可选），导致选项文本 "tNGS" 被误剥首字母 → "NGS"，与 "mNGS"→"NGS" 碰撞——排除法把正确答案 mNGS 也当成"已判错"排除掉，候选全空后 fallback 到 `inputs[0]`（tNGS），**每轮都选同一个已判错的 tNGS → 无限循环**。修复：标点改为必选（`+`），只在有标点（如 "A、"）时才剥字母前缀，"tNGS"/"mNGS" 等无标点选项文本不再被误剥；版本号升至 2.27；
 
 2026/10/13 v2.26 修复**整门课程完成后死循环**（用户发现）：深圳站课件完成态文本是"已学习"（不含"完成"字样），而 `isIncomplete()` 只识别"已完成/完成"→ 全部课件通过考试后，`proceedToNext` 仍把"已学习"课件当未完成的"下一课"反复打开（配合 v2.24 跳过逻辑形成无限循环）。现两处 `isIncomplete`（proceedToNext 与课件结束页续播判断）均把"已学习"视为完成；全完成后无下一课时按既有兜底返回课程列表页/课程首页，不再循环；版本号升至 2.26；
