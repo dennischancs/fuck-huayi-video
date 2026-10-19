@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      2.28
+// @version      2.29
 // @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅拟人模式模拟真人观看习惯（活动时段/每日上限）✅分天策略建议重开时间✅实验功能（一键跳到95%快速标记/直接编辑本地数据）✅支持 91huayi.com 与 cme.szyxjxjy.cn
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
@@ -1951,7 +1951,25 @@
             // 错题记忆、重考计数、答卷映射清掉
             console.log('🎉 [考试] 全部答对，考试通过！');
             try {
-                localStorage.removeItem(SZYX_WRONG_KEY);
+                // 🔥 v2.29：不再全清 wrong 表——其他课程可能还在重考中，
+                // 全清会让它们的排除进度全部丢失 → 错题数发散（1→4）！
+                // 只清除当前课程（qraw）的题目对应的 wrong 条目
+                const wrongMap = getSzyxWrongMap();
+                const qraw = safeParseJSON(localStorage.getItem('huayi_szyx_qraw'), {}) || {};
+                const body = Array.isArray(qraw.body) ? qraw.body : [];
+                if (body.length) {
+                    body.forEach(q => {
+                        if (q && q.question_id && wrongMap[q.question_id]) {
+                            delete wrongMap[q.question_id];
+                        }
+                    });
+                    localStorage.setItem(SZYX_WRONG_KEY, JSON.stringify(wrongMap));
+                    console.log('🧹 [考试] 已清除当前 ' + body.length + ' 道题的 wrong 条目（保留其他课程 ' + Object.keys(wrongMap).length + ' 条）');
+                } else {
+                    // 兜底：没拿到 qraw，退化为全清（极少数情况）
+                    localStorage.removeItem(SZYX_WRONG_KEY);
+                    console.warn('⚠️ [考试] 课程通过但未拿到 qraw，兜底全清 wrong 表');
+                }
                 if (cwid) localStorage.removeItem(szyxRetryKey(cwid));
                 sessionStorage.removeItem(SZYX_LAST_ANS_KEY);
             } catch (e) {}
