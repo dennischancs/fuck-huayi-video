@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      2.29
-// @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅拟人模式模拟真人观看习惯（活动时段/每日上限）✅分天策略建议重开时间✅实验功能（一键跳到95%快速标记/直接编辑本地数据）✅支持 91huayi.com 与 cme.szyxjxjy.cn
+// @version      2.30
+// @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅拟人模式模拟真人观看习惯（活动时段/每日上限）✅分天策略建议重开时间✅服务器课程级首开时间兜底（课件记录被重置时依然可判断尾段直通）✅实验功能（一键跳到95%快速标记/直接编辑本地数据）✅支持 91huayi.com 与 cme.szyxjxjy.cn
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
 // @match        *://*.bokecc.com/*
@@ -228,6 +228,8 @@
     // 🔥 v2.22：服务器端记录的本课件首播时间 begin_time（ms）——来自 getCourseWareState
     // 接口，比本地 huayi_first_play 更权威（本地记录可能因重装脚本/清缓存丢失）
     let szyxServerFirstPlay = 0;
+    // 🔥 v2.30：服务器查询结果摘要（浮窗"服务器"行实时显示，策略判断依据一目了然）
+    let szyxServerStateText = '';
     // 🔥 v2.23：单课件时段隔离——服务器为每个课件记录 [begin_time, end_time]，
     // 真人同一时间段只能学习 1 个课件。以下变量用于"完成登记节流"：
     // 距本课程上一次完成登记不足 gap（随机5~8分钟）时，在结尾前暂停等待 + 暂缓跳转下一课
@@ -335,29 +337,67 @@
         } catch (e) {}
     }
 
+    // 🔥 v2.30：解析 organ_id——优先 sessionStorage.sz_nav；缺失时从 localStorage 备份回填
+    //（新标签页/重开浏览器时 sessionStorage 为空，页面公共脚本又是异步写入 sz_nav，此前
+    // 会直接跳过服务器首播查询）；返回 '' 表示暂不可用（调用方延迟重试）
+    function resolveSzyxOrganId(ol) {
+        try {
+            let navStr = null;
+            try { navStr = sessionStorage.getItem('sz_nav'); } catch (e) {}
+            if (!navStr) {
+                navStr = localStorage.getItem('huayi_szyx_nav_backup');
+                if (navStr) {
+                    try { sessionStorage.setItem('sz_nav', navStr); } catch (e) {}
+                    console.log('⚡ [深圳] sz_nav 缺失，已从 localStorage 备份回填（organ_id 可用）');
+                }
+            }
+            const nav = safeParseJSON(navStr, null);
+            if (Array.isArray(nav)) {
+                const hit = nav.find(n => String(n.level) === String(ol)) || nav[0];
+                if (hit && hit.organ_id) return String(hit.organ_id);
+            }
+        } catch (e) {}
+        return '';
+    }
+
+    // 🔥 v2.30：浮窗"服务器"行——实时显示服务器查询结果，策略判断依据一目了然
+    function updateServerStateLine() {
+        const el = document.getElementById('huayiServerState');
+        if (el) el.textContent = '服务器: ' + (szyxServerStateText || '未查询');
+    }
+
     // 🔥 v2.22：从服务器查询本课件首播时间（begin_time）——异步，结果存 szyxServerFirstPlay
     // 接口：GET /api/course/getCourseWareState?course_id=<cid>&organ_id=<oid>
-    // 鉴权：请求头 token = localStorage.access_token；organ_id 取自 sessionStorage.sz_nav
-    //（数组，元素 {level, organ_id}，按 URL ?ol=Y 匹配 level）
-    function fetchSzyxServerFirstPlay() {
+    // 鉴权：请求头 token = localStorage.access_token；organ_id 见 resolveSzyxOrganId
+    // 🔥 v2.30：① organ_id 拿不到时延迟重试最多 3 次（等页面异步 getOrganlist 写好 sz_nav）；
+    // ② 并行查询 /person/studyRecordList 的课程级 begin_time——课件级记录会因"未答题"被
+    // 服务器整条重置（begin_time 清空），课程级记录（学习记录页显示的开始时间）一直保留，
+    // 作为尾段直通判断的权威兜底
+    function fetchSzyxServerFirstPlay(retry) {
         try {
             const params = new URLSearchParams(location.search);
             const cwid = params.get('cwid');
             const cid = params.get('cid');
             const ol = params.get('ol');
             if (!cwid || !cid) return;
-            let organId = '';
-            try {
-                const nav = safeParseJSON(sessionStorage.getItem('sz_nav'), null);
-                if (Array.isArray(nav)) {
-                    const hit = nav.find(n => String(n.level) === String(ol)) || nav[0];
-                    if (hit && hit.organ_id) organId = String(hit.organ_id);
-                }
-            } catch (e) {}
+            // 🔥 v2.30：organ_id 解析抽到 resolveSzyxOrganId（含 localStorage 备份回填）；
+            // 拿不到时延迟重试最多 3 次——页面公共脚本异步拉取 organ 列表（getOrganlist）
+            // 可能尚未写好 sz_nav，直接放弃会漏掉服务器首播查询
+            const organId = resolveSzyxOrganId(ol);
             if (!organId) {
-                console.log('[深圳] sz_nav 无 organ_id，跳过服务器首播查询');
+                const tried = retry || 0;
+                if (tried < 3) {
+                    console.log('[深圳] organ_id 暂不可用（sz_nav 未就绪），5秒后重试 ' + (tried + 1) + '/3');
+                    setTimeout(() => fetchSzyxServerFirstPlay(tried + 1), 5000);
+                } else {
+                    szyxServerStateText = '查询失败（无 organ_id）';
+                    updateServerStateLine();
+                    console.log('[深圳] sz_nav 无 organ_id（重试后仍失败），跳过服务器首播查询');
+                }
                 return;
             }
+            szyxServerStateText = '查询中…';
+            updateServerStateLine();
             const xhr = new XMLHttpRequest();
             xhr.open('GET', '/api/course/getCourseWareState?course_id=' + encodeURIComponent(cid) +
                 '&organ_id=' + encodeURIComponent(organId), true);
@@ -375,7 +415,8 @@
                         const t = mine.begin_time.replace(/-/g, '/');
                         const ms = new Date(t).getTime();
                         if (!isNaN(ms)) {
-                            szyxServerFirstPlay = ms;
+                            // 🔥 v2.30：取更早者（课程级首开时间可能已由 studyRecordList 先行写入）
+                            if (!szyxServerFirstPlay || ms < szyxServerFirstPlay) szyxServerFirstPlay = ms;
                             console.log('⚡ [深圳] 服务器首播时间: ' + mine.begin_time +
                                 '（' + Math.floor((Date.now() - ms) / 60000) + ' 分钟前，state=' +
                                 mine.study_state + '）');
@@ -399,6 +440,15 @@
                                 '（' + Math.floor((Date.now() - minBegin) / 60000) + ' 分钟前）');
                         }
                     }
+                    // 🔥 v2.30：更新浮窗"服务器"行（课件级查询结果；studyRecordList 返回后
+                    // 会再取更早者刷新一次）
+                    if (szyxServerFirstPlay) {
+                        szyxServerStateText = '首开 ' + new Date(szyxServerFirstPlay).toLocaleString() +
+                            (mine && Number(mine.study_state) === 2 ? ' | 已学习' : '');
+                    } else {
+                        szyxServerStateText = '无首播记录（课件级）';
+                    }
+                    updateServerStateLine();
                     // 🔥 v2.23：合并其他课件的 end_time（服务器端最后学习时刻）到
                     // "最近完成登记"记录，兜底本地记录丢失/换设备的情况
                     let maxOtherEnd = 0;
@@ -436,6 +486,68 @@
                 }
             };
             xhr.send();
+            // 🔥 v2.30：并行查询课程级首开时间——GET /api/person/studyRecordList
+            // 数据来源即"学习记录页"（recordPage.html）表格显示的开始时间；课件级记录
+            // 会因"未答题"被服务器整条重置，但课程级记录一直保留，是最可靠的课程首开
+            // 时间来源。结果：① 合并进 szyxServerFirstPlay（取更早者）；② 写入本地
+            // huayi_course_start 兜底（分天策略/二刷判定的基准）；③ 备份全量映射
+            const xhr2 = new XMLHttpRequest();
+            xhr2.open('GET', '/api/person/studyRecordList?organ_id=' + encodeURIComponent(organId), true);
+            xhr2.setRequestHeader('token', localStorage.getItem('access_token') || '');
+            xhr2.setRequestHeader('Content-Type', 'application/json;charset=UTF-8');
+            xhr2.onreadystatechange = function () {
+                if (xhr2.readyState !== 4) return;
+                try {
+                    const res2 = JSON.parse(xhr2.responseText);
+                    const list2 = res2 && res2.body;
+                    if (Array.isArray(list2)) {
+                        // 备份 course_id → begin_time 全量映射（后续课程直接本地可用）
+                        try {
+                            const map = {};
+                            list2.forEach(c => {
+                                if (c && c.course_id && c.begin_time) {
+                                    map[String(c.course_id).toLowerCase()] = c.begin_time;
+                                }
+                            });
+                            localStorage.setItem('huayi_szyx_record_backup', JSON.stringify(map));
+                        } catch (e) {}
+                        const mine2 = list2.find(c =>
+                            String(c.course_id).toLowerCase() === String(cid).toLowerCase());
+                        if (mine2 && mine2.begin_time) {
+                            const ms2 = new Date(String(mine2.begin_time).replace(/-/g, '/')).getTime();
+                            if (!isNaN(ms2)) {
+                                if (!szyxServerFirstPlay || ms2 < szyxServerFirstPlay) {
+                                    szyxServerFirstPlay = ms2;
+                                    console.log('⚡ [深圳] 课程级首开时间(学习记录): ' + mine2.begin_time +
+                                        '（' + Math.floor((Date.now() - ms2) / 60000) + ' 分钟前，state=' +
+                                        mine2.study_state + '）');
+                                }
+                                // 🔥 v2.30：本地课程起点丢失/偏晚时，按服务器学习记录校正
+                                //（courseStartMs 是分天策略与"二刷"判定的基准；本地丢失时
+                                // 会退化为"本次打开时间"，导致误判为新课从头播放）
+                                try {
+                                    const cs = safeParseJSON(localStorage.getItem('huayi_course_start'), {});
+                                    const key = String(cid).toLowerCase();
+                                    if (!cs[key] || ms2 < cs[key]) {
+                                        cs[key] = ms2;
+                                        localStorage.setItem('huayi_course_start', JSON.stringify(cs));
+                                        console.log('⚡ [深圳] 本地课程起点已按服务器学习记录校正: ' +
+                                            new Date(ms2).toLocaleString());
+                                    }
+                                } catch (e) {}
+                            }
+                            // 🔥 v2.30：刷新浮窗"服务器"行（课程级首开时间参与判定）
+                            if (szyxServerFirstPlay) {
+                                szyxServerStateText = '首开 ' + new Date(szyxServerFirstPlay).toLocaleString();
+                                updateServerStateLine();
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.warn('[深圳] 解析 studyRecordList 失败:', e);
+                }
+            };
+            xhr2.send();
         } catch (e) {}
     }
 
@@ -931,10 +1043,22 @@
 
         // 🌐 v1.6：深圳卫健继教平台（szyxjxjy.cn）页面路由
         if (SITE.isSzyx) {
-            // 🔥 v2.28：把 sz_nav / szExamParams 备份到 localStorage（exam.html 自愈用）
+            // 🔥 v2.28→v2.30：把 sz_nav / szExamParams 备份到 localStorage（exam.html 自愈用）
+            // v2.30：新标签页打开时页面自己的 common.js 异步拉取 organ 列表（getOrganlist）
+            // 后才写 sz_nav，init() 此刻往往还是空的——改为延迟轮询备份（最多 30 秒），
+            // 确保任何入口进来（新标签页/直接输 URL）都能存下 organ_id 供播放页服务器查询用
             try {
-                const nav = sessionStorage.getItem('sz_nav');
-                if (nav) localStorage.setItem('huayi_szyx_nav_backup', nav);
+                const backupNavRetry = (attempt) => {
+                    try {
+                        const nav = sessionStorage.getItem('sz_nav');
+                        if (nav) {
+                            localStorage.setItem('huayi_szyx_nav_backup', nav);
+                            return; // 备份成功，停止轮询
+                        }
+                        if (attempt < 15) setTimeout(() => backupNavRetry(attempt + 1), 2000);
+                    } catch (e) {}
+                };
+                backupNavRetry(0);
                 const p = sessionStorage.getItem('szExamParams');
                 if (p) localStorage.setItem('huayi_szyx_exam_params_backup', p);
             } catch (e) {}
@@ -3289,6 +3413,8 @@
             sug.innerHTML = stext ? `执行建议: ${stext}` : '';
             sug.style.display = stext ? '' : 'none';
         }
+        // 🔥 v2.30：同步刷新"服务器"行
+        updateServerStateLine();
     }
 
     function expandPanel() {
@@ -3343,6 +3469,7 @@
             ${finishStateText ? `<div id="huayiFinishState" style="margin-bottom: 4px; font-size: 10px; opacity: 0.9;">分天策略: ${finishStateText}</div>` : ''}
             ${suggestText ? `<div id="huayiSuggestState" style="margin-bottom: 4px; font-size: 10px; opacity: 0.9;">执行建议: ${suggestText}</div>` : `<div id="huayiSuggestState" style="display: none;"></div>`}
             <div style="margin-bottom: 4px; font-size: 10px; opacity: 0.9;">播放器: ${playerType}</div>
+            ${SITE.isSzyx ? `<div id="huayiServerState" style="margin-bottom: 4px; font-size: 10px; opacity: 0.9;">服务器: ${szyxServerStateText || '未查询'}</div>` : ''}
             ${current ? `<div style="font-size: 10px; opacity: 0.8;">当前: ${current.title.substring(0,16)}...</div>` : ''}
             <div style="font-size: 10px; opacity: 0.8; margin-top: 4px;">课程数: ${courses.length} | CC失败: ${failedCC.length}</div>
 
