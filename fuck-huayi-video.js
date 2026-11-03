@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      2.31
+// @version      2.32
 // @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅拟人模式模拟真人观看习惯（活动时段/每日上限）✅分天策略建议重开时间✅服务器课程级首开时间兜底（课件记录被重置时依然可判断尾段直通）✅实验功能（一键跳到95%快速标记/直接编辑本地数据）✅支持 91huayi.com 与 cme.szyxjxjy.cn
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
@@ -1914,6 +1914,18 @@
                         localStorage.setItem('huayi_szyx_saveres', this.responseText);
                         console.log('🔎 [考试] saveCourseWareFinish 原始响应（已存 localStorage: huayi_szyx_saveres）↓');
                         console.log(this.responseText);
+                        // 🔥 v2.32：交卷响应异常检测——平台风控偶发对交卷请求直接返回
+                        // 404/502 的整页 HTML（"因系统平台功能升级：网站暂时关闭"），
+                        // 而非 JSON。此时本次交卷实际失败且页面不会跳转结果页，需自动重试。
+                        let okJson = false;
+                        try { okJson = JSON.parse(String(this.responseText)).code === 0; } catch (e) {}
+                        if (!okJson || this.status >= 400) {
+                            window.__szyxSubmitBlockedAt = Date.now();
+                            console.warn('⚠️ [考试] 交卷响应异常（HTTP ' + this.status + '），已标记待自动重试：' +
+                                String(this.responseText).replace(/\s+/g, ' ').slice(0, 80));
+                        } else {
+                            window.__szyxSubmitOkAt = Date.now();
+                        }
                     }
                 } catch (e) {}
             });
@@ -2071,6 +2083,21 @@
                 } else if (btn) {
                     btn.click();
                 }
+                // 🔥 v2.32：交卷被拦截自动重试——平台偶发对交卷请求返回 404/502 整页 HTML，
+                // 本次交卷失败、页面停在考试页（用户需手动再点一次交卷）。改为每 5 秒检测一次
+                // 交卷响应标记：被拦截则自动重发（题目与已选答案仍在页面上，直接重新提交即可），
+                // 最多 3 次；成功跳转结果页或标记成功即停止，仍失败的交给下面的 90 秒刷新兜底。
+                let autoRetry = 0;
+                const retryTimer = setInterval(() => {
+                    if (!/exam\.html/i.test(location.pathname)) { clearInterval(retryTimer); return; } // 已跳转=成功
+                    if (window.__szyxSubmitOkAt) { clearInterval(retryTimer); return; }
+                    if (!window.__szyxSubmitBlockedAt) return; // 未收到失败响应，等待 90 秒兜底
+                    if (autoRetry >= 3) { clearInterval(retryTimer); return; }
+                    autoRetry++;
+                    window.__szyxSubmitBlockedAt = 0;
+                    console.warn('🔁 [考试] 交卷被拦截，自动重试第 ' + autoRetry + '/3 次');
+                    if (typeof window.subExam === 'function') window.subExam();
+                }, 5000);
                 // 🔥 v2.16：交卷后守卫——若交卷请求被风控拦截（502/404 弹"网站暂时关闭"、
                 // 页面停在考试页不跳结果页），90 秒后刷新考试页重进，循环不断链
                 setTimeout(() => {
