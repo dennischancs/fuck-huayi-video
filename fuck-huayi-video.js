@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      2.30
+// @version      2.31
 // @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅拟人模式模拟真人观看习惯（活动时段/每日上限）✅分天策略建议重开时间✅服务器课程级首开时间兜底（课件记录被重置时依然可判断尾段直通）✅实验功能（一键跳到95%快速标记/直接编辑本地数据）✅支持 91huayi.com 与 cme.szyxjxjy.cn
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
@@ -249,6 +249,26 @@
             console.warn('JSON解析错误:', e, '数据:', jsonString);
             return defaultValue;
         }
+    }
+
+    // 🔥 v2.31：控制台倒计时——把"X 秒后 YYY"的一次性提示变成可见的倒计时序列
+    //（浏览器 console 无法覆盖已打印的行，采用节流打印：剩余 >10 秒时每 5 秒一条，
+    //  最后 10 秒逐秒打印；归零时打印 endText（可选，动作本身有日志时可不传）。
+    //  useWarn=true 用 console.warn（如错误页恢复）。返回停止函数（一般无需调用）。
+    function countdownLog(totalSec, label, endText, useWarn) {
+        const log = useWarn ? console.warn : console.log;
+        const startAt = Date.now();
+        const timer = setInterval(() => {
+            const left = Math.ceil(totalSec - (Date.now() - startAt) / 1000);
+            if (left <= 0) {
+                clearInterval(timer);
+                if (endText) log(endText);
+                return;
+            }
+            if (left > 10 && left % 5 !== 0) return; // >10 秒时每 5 秒一条，减少刷屏
+            log('⏳ ' + label + '：' + left + ' 秒');
+        }, 1000);
+        return () => clearInterval(timer);
     }
 
     // 🔥 新增：检查元素是否真正可见
@@ -937,6 +957,7 @@
         const valid = target && target.url && (Date.now() - target.ts) < 30 * 60 * 1000;
         const delaySec = Math.floor(20 + Math.random() * 40);
         console.warn('🛑 [考试] 检测到 404/错误页，' + delaySec + ' 秒后自动恢复答题循环');
+        countdownLog(delaySec, '[错误页] 恢复答题循环倒计时', null, true); // 导航离开页面即自然终止
         setPanelStatus('error');
         setTimeout(() => {
             if (valid) { location.href = target.url; }
@@ -2042,6 +2063,7 @@
             console.log('📝 [考试] 已作答 ' + Object.keys(chosen).length + ' 题（锁定正确 ' + fromLocked +
                 ' / API答案 ' + fromApi + ' / 排除法 ' + fromElim + '）（第 ' + (retries + 1) +
                 ' 次交卷），' + Math.round(submitDelay / 1000) + ' 秒后交卷');
+            countdownLog(Math.round(submitDelay / 1000), '[考试] 交卷倒计时', '✅ [考试] 时间到，交卷');
             setTimeout(() => {
                 const btn = document.querySelector('.but2_a');
                 if (btn && typeof window.subExam === 'function') {
@@ -2162,6 +2184,7 @@
         // 🔥 v2.10：重考间隔拟人化随机 20~60 秒，防止答题循环过快被风控中断。
         const retryDelaySec = Math.floor(20 + Math.random() * 40);
         console.log('❌ [考试] 第 ' + retries + ' 次未全对，已记录 ' + recorded + ' 个错题选项，' + retryDelaySec + ' 秒后点"重新考试"');
+        countdownLog(retryDelaySec, '[考试] 重新考试倒计时'); // 点击时自有"🔁 点击重新考试"日志，无需 endText
         // 🔥 v2.9：只点"重新考试"按钮（绝不点"重新学习"），按钮缺失时按同款 URL 兜底导航。
         // exam.html 从 sessionStorage szExamParams 取 course_ware_id，本会话内仍在，无需带 cwid。
         setTimeout(() => {
@@ -2220,6 +2243,7 @@
             const submitDelay = Math.floor(10000 + Math.random() * 10000);
             console.log('📝 [课件评价] 已填写好评：单选 ' + radios + ' 题，评语 ' + texts + ' 条，' +
                 Math.round(submitDelay / 1000) + ' 秒后提交');
+            countdownLog(Math.round(submitDelay / 1000), '[课件评价] 提交倒计时', '✅ [课件评价] 时间到，提交');
             setTimeout(() => {
                 const btn = document.getElementById('submit');
                 if (btn && !btn.getAttribute('disabled')) btn.click();
