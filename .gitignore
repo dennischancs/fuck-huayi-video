@@ -1,0 +1,12 @@
+# macOS 垃圾文件
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+Icon?
+
+# 编辑器/系统临时文件
+*.swp
+*~
