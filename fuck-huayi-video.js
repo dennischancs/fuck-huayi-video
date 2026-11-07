@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         华医网视频播放脚本 Pro
 // @namespace    dennischancs
-// @version      2.32
-// @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅拟人模式模拟真人观看习惯（活动时段/每日上限）✅分天策略建议重开时间✅服务器课程级首开时间兜底（课件记录被重置时依然可判断尾段直通）✅实验功能（一键跳到95%快速标记/直接编辑本地数据）✅支持 91huayi.com 与 cme.szyxjxjy.cn
+// @version      2.33
+// @description  该油猴脚本用于华医网/深圳卫健继教平台的视频继续播放，✅智能切换CC播放器（支持倍速）✅自动播放下一视频✅屏蔽弹窗✅静音播放✅用户行为模拟✅圆球浮窗✅防检测倍速播放（仅限CC播放器，最快8.0x）✅智能跳转逻辑✅自动处理签到弹窗✅自动作答播放中途弹题（答错自动点"返回/继续"并换选项）✅分天时间达标后自动100%完成课件✅课件结束页自动续播下一课✅拟人模式模拟真人观看习惯（活动时段/每日上限）✅分天策略建议重开时间✅课件级记录缺失/被重置时改用1x完整播放（修复"视频观看时长不足"死循环弹窗）✅实验功能（一键跳到95%快速标记/直接编辑本地数据）✅支持 91huayi.com 与 cme.szyxjxjy.cn
 // @author       [dennischancs](https://github.com/dennischancs)
 // @match        *://*.91huayi.com/*
 // @match        *://*.bokecc.com/*
@@ -236,6 +236,19 @@
     let szyxPacingLoggedAt = 0;   // 节流日志防刷屏时间戳
     let szyxHoldActive = false;   // 当前正因节流在结尾前暂停
     let szyxSkipping = false;     // 🔥 v2.24：正在跳过"已学习"课件（跳过不产生新学习记录，无需时段节流）
+    // 🔥 v2.33：课件级服务器记录状态——修复"视频观看时长不足"死循环
+    // 成因：随堂题未答时服务器把该课件整条学习记录重置（begin_time 清空）；此时若用
+    // v2.30 的课程级首开时间兜底判定"时间差已达标"，从未学过的课件也会走尾段直通 →
+    // 本次播放只有几秒 → saveCourseWarePlayRecord 被服务器以"时长不足"拒绝并弹窗 →
+    // 脚本继续跳下一课 → 下一课同样命运，整门课无限循环。
+    let szyxWareBeginMs = 0;           // 本课件(cwid)自身 begin_time（课件级权威，0=无记录）
+    let szyxWareRecordMissing = false; // 服务器课件级记录缺失/被重置（未学习、无 begin_time）
+    let szyxServerQueried = false;     // 服务器查询是否已返回（未返回前不授权尾段直通）
+    let szyxFullPlayMode = false;      // 本课件必须 1x 从头完整播放（禁止尾段直通与99%抢跳）
+    let szyxShortageHandledAt = 0;     // "时长不足"弹窗最近一次处理时刻（防重复点击/重复刷新）
+    let szyxShortageReloadPending = false; // 已排队"刷新重播"（等待刷新期间禁止跳下一课）
+    const SZYX_SHORTAGE_KEY = 'huayi_szyx_shortage';           // cwid → 最近一次"时长不足"时刻
+    const SZYX_SHORTAGE_RELOAD_KEY = 'huayi_szyx_shortage_reload'; // 自动重播刷新限频时间戳
     const urlTip = window.location.pathname.split('/').pop().split('?')[0];
 
     // 🔥 新增：安全的JSON解析函数
@@ -383,7 +396,8 @@
     // 🔥 v2.30：浮窗"服务器"行——实时显示服务器查询结果，策略判断依据一目了然
     function updateServerStateLine() {
         const el = document.getElementById('huayiServerState');
-        if (el) el.textContent = '服务器: ' + (szyxServerStateText || '未查询');
+        if (el) el.textContent = '服务器: ' + (szyxServerStateText || '未查询') +
+            (szyxFullPlayMode ? ' | 完整播放模式' : '');
     }
 
     // 🔥 v2.22：从服务器查询本课件首播时间（begin_time）——异步，结果存 szyxServerFirstPlay
@@ -418,6 +432,7 @@
             }
             szyxServerStateText = '查询中…';
             updateServerStateLine();
+            szyxServerQueried = false;
             const xhr = new XMLHttpRequest();
             xhr.open('GET', '/api/course/getCourseWareState?course_id=' + encodeURIComponent(cid) +
                 '&organ_id=' + encodeURIComponent(organId), true);
@@ -425,6 +440,7 @@
             xhr.setRequestHeader('Content-Type', 'application/json;charset=UTF-8');
             xhr.onreadystatechange = function () {
                 if (xhr.readyState !== 4) return;
+                szyxServerQueried = true;
                 try {
                     const resp = JSON.parse(xhr.responseText);
                     const list = resp && resp.body && resp.body.setCourseWareDate;
@@ -437,15 +453,26 @@
                         if (!isNaN(ms)) {
                             // 🔥 v2.30：取更早者（课程级首开时间可能已由 studyRecordList 先行写入）
                             if (!szyxServerFirstPlay || ms < szyxServerFirstPlay) szyxServerFirstPlay = ms;
+                            // 🔥 v2.33：课件级 begin_time 单独记录——只有它才可授权尾段直通
+                            //（课程级首开时间对"从未学过/被重置"的课件同样很旧，会把它们误判为达标）
+                            szyxWareBeginMs = ms;
+                            szyxWareRecordMissing = false;
                             console.log('⚡ [深圳] 服务器首播时间: ' + mine.begin_time +
                                 '（' + Math.floor((Date.now() - ms) / 60000) + ' 分钟前，state=' +
                                 mine.study_state + '）');
                         }
                     }
+                    // 🔥 v2.33：课件级记录缺失/被服务器重置（未学习、无 begin_time）→
+                    // 禁止尾段直通，改为 1x 从头完整播放（顺带让随堂题正常弹出并重建记录）
+                    if (list.length > 0 && (!mine || !mine.begin_time)) {
+                        szyxWareRecordMissing = true;
+                        szyxWareBeginMs = 0;
+                        enterSzyxFullPlay('服务器课件级记录缺失（未学习/被重置）');
+                    }
                     // 🔥 v2.25：服务器会把"未答题"的课件整条记录重置为未学习
                     //（begin_time 清空）。此时回退取课程内所有课件中最早的
-                    // begin_time（= 服务器端记录的该课程最先打开时间）作为
-                    // 尾段直通判断的依据
+                    // begin_time（= 服务器端记录的该课程最先打开时间）。
+                    // 🔥 v2.33：该值仅用于浮窗显示与课程级计时，**不再参与尾段直通判定**
                     if (!szyxServerFirstPlay) {
                         let minBegin = 0;
                         list.forEach(w => {
@@ -489,6 +516,7 @@
                     // （含拟人门控与 v2.23 单课件时段隔离节流），只有"未学习/学习中"才需要学
                     if (mine && Number(mine.study_state) === 2) {
                         console.log('⏭️ [深圳] 本课件服务器状态为"已学习"（学习+考试均已完成），跳过不播');
+                        clearSzyxShortage(cwid); // 🔥 v2.33：已学习即视为恢复正常，解除直通冷却
                         // 本课件自身的 end_time 也计入"最近完成登记"，供下一课件时段隔离参考
                         if (mine.end_time) {
                             const curEnd = new Date(String(mine.end_time).replace(/-/g, '/')).getTime();
@@ -595,6 +623,9 @@
 
     function markSzyxWareFinished() {
         try {
+            // 🔥 v2.33：本课件正常完成 → 解除"时长不足"直通冷却
+            const cw = new URLSearchParams(location.search).get('cwid');
+            if (cw) clearSzyxShortage(cw);
             const cid = getSzyxCourseId();
             if (!cid) return;
             const now = Date.now();
@@ -626,6 +657,58 @@
         return Math.max(0, last + szyxPacingGapMs() - Date.now());
     }
     function szyxPacingOk() { return szyxPacingWaitMs() <= 0; }
+
+    // 🔥 v2.33："视频观看时长不足"冷却标记——服务器拒绝过本课件的播放记录后，
+    // 12 小时内禁止本课件再做尾段直通（成功完成或服务器状态变为"已学习"时清除），
+    // 避免"直通→被拒→重播→再直通"的死循环反复弹窗
+    function getSzyxShortageMap() {
+        return safeParseJSON(localStorage.getItem(SZYX_SHORTAGE_KEY), {}) || {};
+    }
+    function markSzyxShortage(cwid) {
+        try {
+            if (!cwid) return;
+            const map = getSzyxShortageMap();
+            map[cwid] = Date.now();
+            localStorage.setItem(SZYX_SHORTAGE_KEY, JSON.stringify(map));
+        } catch (e) {}
+    }
+    function hasSzyxShortage(cwid) {
+        try {
+            if (!cwid) return false;
+            const t = getSzyxShortageMap()[cwid];
+            return !!t && Date.now() - t < 12 * 3600 * 1000;
+        } catch (e) { return false; }
+    }
+    function clearSzyxShortage(cwid) {
+        try {
+            if (!cwid) return;
+            const map = getSzyxShortageMap();
+            if (map[cwid]) {
+                delete map[cwid];
+                localStorage.setItem(SZYX_SHORTAGE_KEY, JSON.stringify(map));
+            }
+        } catch (e) {}
+    }
+
+    // 🔥 v2.33：进入"完整播放"模式——本课件服务器记录缺失/被重置/曾被拒，
+    // 必须 1x 从头播完（真实墙钟时长 ≈ 视频时长，服务器才会接受播放记录）
+    function enterSzyxFullPlay(reason) {
+        if (szyxFullPlayMode) return;
+        szyxFullPlayMode = true;
+        szyxTailMode = false;
+        currentSpeed = 1.0;
+        realPlaybackRate = 1.0;
+        clearInterval(timeCheckInterval); // 停掉倍速监控（其中的95%抢跳会跳过随堂题）
+        try {
+            const video = document.querySelector('video');
+            if (video) originalDescriptor.set.call(video, 1.0);
+            const cp = window.cc_js_Player;
+            if (cp && cp.setPlaybackRate) cp.setPlaybackRate(1.0);
+        } catch (e) {}
+        console.log('🛡️ [深圳] ' + reason + ' → 本课件改为 1x 从头完整播放（禁止尾段直通/99%抢跳）');
+        updateServerStateLine();
+        setPanelStatus('playing');
+    }
 
     // 🔥 v1.5：课件页内嵌的 var cid（课程唯一标识，课程级考核用）
     // 🌐 v1.6：szyxjxjy.cn 的 cid 直接在 URL 参数 ?cid=... 里（casePage/ccPlay 都是）
@@ -1092,6 +1175,11 @@
                 saveCourseList();
                 // 🔥 v2.18：在 initVideo 的 recordFirstPlay() 之前判断是否已有首播记录
                 szyxIsReplay = !!getFirstPlayTime(new URLSearchParams(location.search).get('cwid'));
+                // 🔥 v2.33：本课件此前被服务器判定过"时长不足" → 打开即锁定 1x 完整播放
+                //（不等服务器查询返回，避免查询延迟期间误做尾段直通再次被拒）
+                if (hasSzyxShortage(new URLSearchParams(location.search).get('cwid'))) {
+                    enterSzyxFullPlay('本地记录：本课件曾被判定"时长不足"');
+                }
                 // 🔥 v2.22：异步查询服务器端首播时间（begin_time），供尾段直通作权威判断
                 fetchSzyxServerFirstPlay();
                 initVideo(2); // 该站只用 CC 播放器
@@ -1319,6 +1407,8 @@
             if (!canCompleteFully(video.duration)) return false;
             // 🔥 v2.18：深圳站尾段直通模式已接管（最后10秒固定 1.0x），跳过本函数的 99%/8x 逻辑
             if (SITE.isSzyx && szyxTailMode) return true;
+            // 🔥 v2.33：完整播放模式禁止 99% 抢跑（否则会跳过随堂题、播放时长不足被服务器拒绝）
+            if (SITE.isSzyx && szyxFullPlayMode) return false;
             // 🔥 v2.23：单课件时段隔离——深圳站距上一课件完成登记不足 gap 时，禁止
             // 99%/8x 抢跑（否则视频会在结尾前高速冲线，绕过 checkVideoStatusSzyx
             // 的结尾暂停节流，导致两个课件在同一时间段内先后完成）
@@ -1594,10 +1684,20 @@
             // 直接跳到最后10秒，强制 1.0x 播完（无视用户当前倍速设置），播完自然走考试模块
             // 🔥 v2.22：新增服务器端权威判断——getCourseWareState 返回的 begin_time 距今
             // ≥ 时长×1.1 即认定"服务器早已记录过首播、时间差达标"，跳过本地两级保守校验
+            // 🔥 v2.33：① 只认**课件级** begin_time（szyxWareBeginMs），课程级首开兜底不再授权
+            //（否则随堂题未答被重置的课件会被误判达标 → 直通 → 服务器拒绝"时长不足"死循环）；
+            // ② 服务器查询未返回、课件级记录缺失、曾触发"时长不足"、已进入完整播放模式时，
+            // 一律禁止直通
             if (!szyxTailMode && video && video.duration && !isNaN(video.duration) && !video.ended) {
-                const serverOk = szyxServerFirstPlay > 0 &&
-                    Date.now() - szyxServerFirstPlay >= video.duration * 1000 * TIME_MARGIN;
-                const localOk = szyxIsReplay && canCompleteFully(video.duration);
+                const tailCwid = new URLSearchParams(location.search).get('cwid');
+                const tailAllowed = !szyxFullPlayMode && !szyxWareRecordMissing &&
+                    !hasSzyxShortage(tailCwid);
+                const serverOk = tailAllowed && szyxServerQueried && szyxWareBeginMs > 0 &&
+                    Date.now() - szyxWareBeginMs >= video.duration * 1000 * TIME_MARGIN;
+                // 服务器查询没做成（如拿不到 organ_id）时才退回本地首播记录判断；
+                // 服务器数据可用时一律以课件级 begin_time 为准（本地记录可能远早于服务器重置后的时间）
+                const localOk = tailAllowed && !szyxServerQueried && szyxIsReplay &&
+                    canCompleteFully(video.duration);
                 // 🔥 v2.23：尾段直通同样受"单课件时段隔离"节流——上一课件完成登记后
                 // 不足 gap 不得再完成下一个（否则两个课件会在同一时间段内先后完成）
                 if ((serverOk || localOk) && humanizeAllowsPlay() && szyxPacingOk()) {
@@ -1644,6 +1744,10 @@
                             console.log('🎓 视频结束且登记完成，进入考试: ' + examHref);
                             setPanelStatus('exam');
                             setTimeout(() => { location.href = examHref; }, 2000);
+                        } else if (szyxShortageReloadPending) {
+                            // 🔥 v2.33：本次播放记录被服务器拒绝（时长不足）且已排队刷新重播，
+                            // 不能跳下一课（否则又进入"直通→被拒"死循环）
+                            console.log('🛡️ [深圳] 服务器拒绝本次播放记录，等待刷新以 1x 重播，不跳下一课');
                         } else {
                             proceedToNext();
                         }
@@ -2498,6 +2602,49 @@
                             console.log('⚠️ 5分钟内已自动刷新2次，弹窗留给用户手动处理');
                         }
                     });
+                } catch (e) {}
+            }, 2000);
+
+            // 🛡️ v2.33：深圳站「视频观看时长不足」弹窗自动处理
+            // 成因：随堂题未答 → 服务器把本课件学习记录重置（begin_time 清空），若仍走尾段直通，
+            //       页面提交 saveCourseWarePlayRecord 会被服务器拒绝并弹出此窗；脚本旧逻辑继续跳
+            //       下一课，形成"直通→被拒→跳课→再直通"死循环，整门课永远学不完。
+            // 处理：① 关闭弹窗；② 标记本课件 12 小时内禁止直通；③ 切 1x 完整播放；
+            //       ④ 视频已播完则限频刷新重播（10 分钟内最多 2 次，防死循环）。
+            setInterval(() => {
+                try {
+                    let hit = null;
+                    document.querySelectorAll('.layui-layer').forEach(layer => {
+                        if (hit || !layer.textContent) return;
+                        if (layer.textContent.indexOf('时长不足') === -1) return;
+                        hit = layer;
+                    });
+                    if (!hit) return;
+                    // 同一个弹窗只处理一次（关闭动画未结束时避免重复点击/重复计数刷新）
+                    if (Date.now() - szyxShortageHandledAt < 20000) return;
+                    szyxShortageHandledAt = Date.now();
+                    const cwid = new URLSearchParams(location.search).get('cwid');
+                    markSzyxShortage(cwid);
+                    enterSzyxFullPlay('服务器提示"视频观看时长不足"');
+                    const btn = hit.querySelector('.layui-layer-btn0') ||
+                                hit.querySelector('.layui-layer-close');
+                    if (btn) btn.click();
+                    console.log('🛡️ [深圳] 检测到"视频观看时长不足"弹窗：已关闭，本课件改为 1x 完整播放');
+                    const video = document.querySelector('video');
+                    if (video && video.ended) {
+                        const KEY = SZYX_SHORTAGE_RELOAD_KEY + '_' + (cwid || 'anon');
+                        const now = Date.now();
+                        const stamps = safeParseJSON(localStorage.getItem(KEY), []).filter(t => now - t < 10 * 60 * 1000);
+                        if (stamps.length < 2) {
+                            stamps.push(now);
+                            localStorage.setItem(KEY, JSON.stringify(stamps));
+                            szyxShortageReloadPending = true;
+                            countdownLog(10, '刷新页面（1x 从头重播本课件）', '🔄 [深圳] 刷新页面，1x 从头重播本课件');
+                            setTimeout(() => location.reload(), 10000);
+                        } else {
+                            console.log('⚠️ [深圳] 10分钟内已自动刷新2次，停止自动重播，请手动检查该课件');
+                        }
+                    }
                 } catch (e) {}
             }, 2000);
 
